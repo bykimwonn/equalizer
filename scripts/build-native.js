@@ -1,12 +1,15 @@
 /**
  * Builds the native WASAPI addon (Windows only — honest failure elsewhere).
+ * Uses the locally installed node-gyp (devDependency) — no PATH assumptions.
  */
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const require = createRequire(import.meta.url);
 
 if (os.platform() !== 'win32') {
   console.error(
@@ -20,9 +23,16 @@ if (os.platform() !== 'win32') {
   process.exit(1);
 }
 
-const r = spawnSync('node-gyp', ['configure', 'build'], {
+let gypBin;
+try {
+  gypBin = require.resolve('node-gyp/bin/node-gyp.js');
+} catch {
+  console.error('node-gyp not found in node_modules — run "npm install" first.');
+  process.exit(1);
+}
+
+const r = spawnSync(process.execPath, [gypBin, 'configure', 'build'], {
   cwd: path.join(root, 'native', 'wasapi'),
-  stdio: 'inherit',
-  shell: true
+  stdio: 'inherit'
 });
 process.exit(r.status ?? 1);

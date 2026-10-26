@@ -43,18 +43,6 @@ Napi::Value EnumerateDevices(const Napi::CallbackInfo& info) {
   return arr;
 }
 
-class StreamWrapper : public Napi::ObjectWrap<StreamWrapper> {
- public:
-  static Napi::Object Init(Napi::Env env, Napi::Object exports) {
-    Napi::Function ctor = DefineClass(env, "Stream", {});
-    exports.Set("Stream", ctor);
-    return exports;
-  }
-
-  explicit StreamWrapper(const Napi::CallbackInfo& info)
-      : Napi::ObjectWrap<StreamWrapper>(info) {}
-};
-
 Napi::Value StartStream(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   if (info.Length() < 1 || !info[0].IsObject()) {

@@ -24,14 +24,24 @@ export class NativeWasapiBackend extends EventEmitter {
     this.native = null;
     this.stream = null;
     this.unavailableReason = null;
+    this._loadNative();
+  }
+
+  /** Load (or reload) the native addon. Retried on every start/enumerate so a
+   *  module built after app launch is picked up without restarting the app. */
+  _loadNative() {
+    if (this.native) return true;
+    if (os.platform() !== 'win32') {
+      this.unavailableReason = `native WASAPI backend requires Windows (current platform: ${os.platform()})`;
+      return false;
+    }
     try {
-      if (os.platform() !== 'win32') {
-        this.unavailableReason = `native WASAPI backend requires Windows (current platform: ${os.platform()})`;
-      } else {
-        this.native = require('../../native/wasapi/build/Release/bt_wasapi.node');
-      }
+      this.native = require('../../native/wasapi/build/Release/bt_wasapi.node');
+      this.unavailableReason = null;
+      return true;
     } catch (e) {
-      this.unavailableReason = `native module not loaded: ${e.message}. Run "npm run build:native" on Windows with VS Build Tools installed.`;
+      this.unavailableReason = `native module not loaded: ${e.message}. Run "npm run build:native" on Windows with VS Build Tools installed, then press Refresh.`;
+      return false;
     }
   }
 
@@ -45,7 +55,7 @@ export class NativeWasapiBackend extends EventEmitter {
   }
 
   enumerateDevices() {
-    if (!this.native) return [];
+    if (!this._loadNative()) return [];
     return this.native.enumerateDevices();
   }
 
@@ -59,7 +69,7 @@ export class NativeWasapiBackend extends EventEmitter {
    * @param {(L:Float32Array,R:Float32Array)=>void} opts.process in-place DSP callback
    */
   start({ captureDeviceId = 'default', captureMode = 'process-loopback', renderDeviceId = 'default', sampleRate = 48000, blockFrames = 256, process: processFn }) {
-    if (!this.native) throw new Error(this.unavailableReason ?? 'native backend unavailable');
+    if (!this._loadNative()) throw new Error(this.unavailableReason ?? 'native backend unavailable');
     this.stream = this.native.startStream({
       captureDeviceId,
       captureMode,

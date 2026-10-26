@@ -6,6 +6,19 @@ import path from 'node:path';
 import { SettingsStore, machineKeyCryptor, JsonStore } from '../electron/settings-store.js';
 import { profileSettings } from '../engine/profiles.js';
 
+/** Windows-safe temp cleanup: AV/indexers can hold handles briefly after close. */
+async function cleanup(dir) {
+  for (let i = 0; i < 6; i++) {
+    try {
+      await rm(dir, { recursive: true, force: true });
+      return;
+    } catch (e) {
+      if (!['ENOTEMPTY', 'EPERM', 'EACCES', 'EBUSY'].includes(e.code)) throw e;
+      await new Promise((r) => setTimeout(r, 40 * (i + 1)));
+    }
+  }
+}
+
 async function makeStore() {
   const dir = await mkdtemp(path.join(tmpdir(), 'bt-eq-'));
   const store = new SettingsStore(dir, machineKeyCryptor(dir));
@@ -22,7 +35,7 @@ test('settings persist across store instances', async () => {
   assert.equal(s.mode, 'hybrid');
   assert.equal(s.audio.blockFrames, 512);
   assert.equal(s.ai.provider, 'auto'); // defaults survive upgrade merge
-  await rm(dir, { recursive: true, force: true });
+  await cleanup(dir);
 });
 
 test('API keys are never stored in plain JSON', async () => {
@@ -48,7 +61,7 @@ test('API keys are never stored in plain JSON', async () => {
   assert.equal(status.groq.configured, false);
   assert.equal(status.gemini.configured, true);
   assert.ok(status.gemini.storage.includes('machine key'));
-  await rm(dir, { recursive: true, force: true });
+  await cleanup(dir);
 });
 
 test('custom profiles: save / rename / duplicate / delete / export / import', async () => {
@@ -68,6 +81,7 @@ test('custom profiles: save / rename / duplicate / delete / export / import', as
   const exported = await store.exportProfile(saved.id);
   assert.equal(exported.settings.outputGainDb, -3);
   const imported = await store.importProfile({ name: 'Imported', description: 'x', settings: exported.settings });
+  assert.ok(imported.id);
   assert.equal((await store.listCustomProfiles()).length, 2);
 
   await store.deleteCustomProfile(saved.id);
@@ -75,7 +89,7 @@ test('custom profiles: save / rename / duplicate / delete / export / import', as
 
   await assert.rejects(() => store.importProfile({ name: 'broken' }), TypeError);
   await assert.rejects(() => store.saveCustomProfile({}), TypeError);
-  await rm(dir, { recursive: true, force: true });
+  await cleanup(dir);
 });
 
 test('personalization: feedback history capped and resettable', async () => {
@@ -92,7 +106,7 @@ test('personalization: feedback history capped and resettable', async () => {
   const after = await store.getPersonalization();
   assert.equal(after.feedback.length, 0);
   assert.equal(after.preferences.strongerBass, false);
-  await rm(dir, { recursive: true, force: true });
+  await cleanup(dir);
 });
 
 test('DSP settings persist and survive corrupt files gracefully', async () => {
@@ -111,14 +125,31 @@ test('DSP settings persist and survive corrupt files gracefully', async () => {
   const fallback = await store2.getDspSettings();
   assert.equal(fallback.version, 1);
   assert.equal(fallback.eq.bands.length, 10);
-  await rm(dir, { recursive: true, force: true });
+  await cleanup(dir);
 });
 
-test('JsonStore atomic writes produce valid JSON', async () => {
+test('JsonStore atomic writes produce valid JSON under concurrency', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'bt-eq-js-'));
   const js = new JsonStore(path.join(dir, 'x', 'y.json'));
+  // concurrent writes: serialized queue + retry-rename must survive
+  // Windows' replace-rename semantics and AV interference
   await Promise.all([1, 2, 3, 4, 5].map((i) => js.write({ i })));
   const final = await js.read();
   assert.ok([1, 2, 3, 4, 5].includes(final.i));
-  await rm(dir, { recursive: true, force: true });
+  // on-disk content must be valid JSON too
+  const onDisk = JSON.parse(await readFile(path.join(dir, 'x', 'y.json'), 'utf8'));
+  assert.ok([1, 2, 3, 4, 5].includes(onDisk.i));
+  await cleanup(dir);
+});
+
+test('JsonStore update() read-modify-write is lossless under concurrency', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'bt-eq-js-'));
+  const js = new JsonStore(path.join(dir, 'z.json'));
+  await js.write({ count: 0 });
+  await Promise.all(
+    Array.from({ length: 20 }, () => js.update((cur) => ({ count: (cur.count ?? 0) + 1 })))
+  );
+  const final = await js.read();
+  assert.equal(final.count, 20, 'serialized updates must not lose increments');
+  await cleanup(dir);
 });

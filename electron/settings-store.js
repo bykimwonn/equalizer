@@ -17,6 +17,9 @@ export class JsonStore {
   constructor(filePath) {
     this.filePath = filePath;
     this._cache = null;
+    // serialize writes per store: prevents tmp/rename races on Windows and
+    // makes read-modify-write updates atomic
+    this._queue = Promise.resolve();
   }
 
   async read() {
@@ -32,22 +35,62 @@ export class JsonStore {
 
   async write(obj) {
     this._cache = obj;
+    const task = this._queue.then(() => this._writeAtomic(obj));
+    this._queue = task.catch(() => {});
+    return task;
+  }
+
+  async _writeAtomic(obj) {
     await fs.mkdir(path.dirname(this.filePath), { recursive: true });
     // unique tmp name per write — concurrent writes must not collide
     const tmp = `${this.filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
     await fs.writeFile(tmp, JSON.stringify(obj, null, 2), 'utf8');
-    await fs.rename(tmp, this.filePath);
+    try {
+      await renameWithRetry(tmp, this.filePath);
+    } catch (e) {
+      // last resort (Windows AV interference): copy-over then remove tmp
+      try {
+        await fs.copyFile(tmp, this.filePath);
+        await fs.unlink(tmp).catch(() => {});
+      } catch {
+        await fs.unlink(tmp).catch(() => {});
+        throw e;
+      }
+    }
   }
 
   async update(fn) {
-    const cur = (await this.read()) ?? {};
-    const next = fn(cur) ?? cur;
-    await this.write(next);
-    return next;
+    const task = this._queue.then(async () => {
+      const cur = (await this.read()) ?? {};
+      const next = fn(cur) ?? cur;
+      await this._writeAtomic(next);
+      this._cache = next;
+      return next;
+    });
+    this._queue = task.catch(() => {});
+    return task;
   }
 
   invalidate() {
     this._cache = null;
+  }
+}
+
+/**
+ * Windows-safe rename: the destination can be momentarily locked by a
+ * concurrent rename or by antivirus/indexer scanning the fresh tmp file.
+ * Retry transient errors, then let the caller fall back.
+ */
+async function renameWithRetry(from, to, attempts = 6) {
+  const transient = new Set(['EPERM', 'EACCES', 'EBUSY', 'EAGAIN', 'ENOTEMPTY']);
+  for (let i = 0; ; i++) {
+    try {
+      await fs.rename(from, to);
+      return;
+    } catch (e) {
+      if (i >= attempts - 1 || !transient.has(e.code)) throw e;
+      await new Promise((r) => setTimeout(r, 15 * (i + 1)));
+    }
   }
 }
 

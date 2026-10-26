@@ -170,8 +170,8 @@ export class EngineHost extends EventEmitter {
     if (!this.engine) return;
     this.engine.setSettings(settings);
     this.controller.setCurrentSettings(settings);
-    // fire-and-forget persistence — never blocks the audio path
-    this.settingsStore.setDspSettings(settings).catch(() => {});
+    // fire-and-forget persistence — never blocks the audio path; shutdown() flushes
+    this._pendingPersist = this.settingsStore.setDspSettings(settings).catch(() => {});
     this.emit('settings-changed', { settings, meta });
   }
 
@@ -272,5 +272,8 @@ export class EngineHost extends EventEmitter {
 
   async shutdown() {
     await this.stop();
+    // flush any in-flight settings persistence — clean quit must not race
+    // the config writer (Windows especially: leftover tmp files / lost writes)
+    if (this._pendingPersist) await this._pendingPersist;
   }
 }

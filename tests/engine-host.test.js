@@ -6,6 +6,19 @@ import path from 'node:path';
 import { SettingsStore, machineKeyCryptor } from '../electron/settings-store.js';
 import { EngineHost } from '../electron/audio/engine-host.js';
 
+/** Windows-safe temp cleanup: AV/indexers can hold handles briefly after close. */
+async function cleanup(dir) {
+  for (let i = 0; i < 6; i++) {
+    try {
+      await rm(dir, { recursive: true, force: true });
+      return;
+    } catch (e) {
+      if (!['ENOTEMPTY', 'EPERM', 'EACCES', 'EBUSY'].includes(e.code)) throw e;
+      await new Promise((r) => setTimeout(r, 40 * (i + 1)));
+    }
+  }
+}
+
 function makeFakeAi() {
   return {
     async recommend() {
@@ -33,14 +46,22 @@ async function makeHost() {
   return { dir, store, host };
 }
 
-test('engine refuses to pretend: WASAPI start on non-Windows fails honestly', async () => {
+test('engine refuses to pretend: unavailable WASAPI backend fails honestly', async () => {
   const { dir, store, host } = await makeHost();
   await store.setAppSettings({ audio: { backend: 'wasapi' } });
+  // Force the backend into the unavailable state so this contract test is
+  // portable: on a Windows machine with the native module built it must still
+  // exercise the honest-failure path without touching real audio devices.
+  host.backends.wasapi.native = null;
+  host.backends.wasapi.unavailableReason = 'forced unavailable for test';
   const res = await host.start();
   assert.equal(res.ok, false);
-  assert.ok(res.requiresSimulation === true || res.error, 'must explain why');
+  assert.equal(res.requiresSimulation, true);
+  assert.ok(res.error.includes('forced unavailable'), 'must explain why');
   assert.equal(host.status.state, 'error');
-  await rm(dir, { recursive: true, force: true });
+  assert.ok(host.status.lastError.includes('forced unavailable'));
+  await host.shutdown();
+  await cleanup(dir);
 });
 
 test('simulation backend drives real DSP + telemetry end-to-end', async () => {
@@ -49,7 +70,7 @@ test('simulation backend drives real DSP + telemetry end-to-end', async () => {
   const res = await host.start();
   assert.ok(res.ok, `start failed: ${res.error}`);
   assert.equal(host.status.backend, 'simulation');
-  assert.ok(host.status.backendDetail.includes('no real audio I/O') || host.status.backendDetail.includes('Simulation'));
+  assert.ok(host.status.backendDetail.toLowerCase().includes('simulation'));
 
   const telemetry = await new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('no telemetry within 3 s')), 3000);
@@ -86,7 +107,7 @@ test('simulation backend drives real DSP + telemetry end-to-end', async () => {
 
   await host.shutdown();
   assert.equal(host.status.state, 'stopped');
-  await rm(dir, { recursive: true, force: true });
+  await cleanup(dir);
 });
 
 test('mode changes propagate to the controller and persist', async () => {
@@ -97,7 +118,7 @@ test('mode changes propagate to the controller and persist', async () => {
   await host.setMode('manual');
   assert.equal(host.controller.mode, 'manual');
   await assert.rejects(() => host.setMode('quantum'));
-  await rm(dir, { recursive: true, force: true });
+  await cleanup(dir);
 });
 
 test('clip guard runs against real measured features in the loop', async () => {
@@ -112,6 +133,10 @@ test('clip guard runs against real measured features in the loop', async () => {
   await host.controller.onFeatures(host.engine.features.latest);
   assert.ok(applied.length >= 1, 'safety rule must act on clipping');
   assert.ok(host.controller.safetyActions >= 1);
+
+  // shutdown must flush in-flight settings persistence before we tear down
   await host.shutdown();
-  await rm(dir, { recursive: true, force: true });
+  const persisted = await store.getDspSettings();
+  assert.ok(Number.isFinite(persisted.outputGainDb), 'flushed settings must be readable');
+  await cleanup(dir);
 });
