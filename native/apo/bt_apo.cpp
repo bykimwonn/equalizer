@@ -5,26 +5,26 @@
  * (the same mechanism Equalizer APO uses). Processes the final playback mix
  * system-wide: every application's audio passes through this APO.
  *
- * Implements:
- *   IAudioProcessingObject
- *   IAudioProcessingObjectRT   (real-time Process — must not allocate/lock/IO)
- *   IAudioProcessingObjectControls
- *   IAudioSystemEffects        (property store for settings)
+ * Interfaces (exact SDK signatures from audioenginebaseapo.h / mmreg.h):
+ *   IAudioProcessingObject            — Reset, GetLatency, GetRegistrationProperties,
+ *                                       Initialize, IsInput/OutputFormatSupported (IAudioMediaType),
+ *                                       GetInputChannelCount
+ *   IAudioProcessingObjectRT          — APOProcess, CalcInputFrames, CalcOutputFrames
+ *   IAudioProcessingObjectConfiguration — LockForProcess, UnlockForProcess
  *
- * Settings are read from a shared memory-mapped config file written by the BT
- * AI Equalizer app (%ProgramData%\BT-AI-Equalizer\apo-config.bin), polled
- * cheaply by version counter — no IPC in the RT path.
+ * Real-time safety: APOProcess performs no allocation, locking, or I/O.
+ * Settings come from a memory-mapped config file written by the BT app
+ * (%ProgramData%\BT-AI-Equalizer\apo-config.bin), polled by atomic version.
  *
- * Build: cl /LD /std:c++17 /EHsc bt_apo.cpp /link /DLL /OUT:bt-ai-eq-apo.dll
- *        ole32.lib uuid.lib
- * Registration: see register-apo.ps1 (requires admin) and README.md.
+ * Build: cl /LD /std:c++17 /EHsc bt_apo.cpp apo_dsp.h /link /DLL
+ *        /OUT:bin\bt-ai-eq-apo.dll ole32.lib uuid.lib
+ * Registration: register-apo.ps1 (admin) — see README.md for signing rules.
  */
 #include <windows.h>
-#include <mmreg.h>
-#include <audiopocli.h>  // APO interfaces
-#include <mmdeviceapi.h>
-#include <propkey.h>
-#include <propvarutil.h>
+#include <objbase.h>
+#include <mmreg.h>             // APO_CONNECTION_PROPERTY, WAVEFORMATEX
+#include <audiomediatype.h>    // IAudioMediaType
+#include <audioenginebaseapo.h>// APO interfaces, APO_REG_PROPERTIES, APO_CONNECTION_DESCRIPTOR
 
 #include <atomic>
 #include <cstring>
@@ -35,23 +35,22 @@
 static const CLSID CLSID_BtAiEqApo = {
   0x7d4a2c4e, 0x9c3b, 0x4f2a, {0x9e, 0x1d, 0x8b, 0x5f, 0x3a, 0x6c, 0x1b, 0x22}};
 
-static const WCHAR* kConfigPath = L"\\??\\C:\\ProgramData\\BT-AI-Equalizer\\apo-config.bin";
-
-// Minimal APO registration structures (documented APO_REG_PROPERTIES pattern).
 static const APO_REG_PROPERTIES kRegProps = {
   CLSID_BtAiEqApo,
-  APO_FLAG_SAMPLESPERFRAME_MUST_MATCH | APO_FLAG_FRAMESPERSECOND_MUST_MATCH |
-      APO_FLAG_BITSPERSAMPLE_MUST_MATCH | APO_FLAG_INPLACE,
-  {1, 1},   // minInput/maxInput connections
-  {1, 1},
-  {1, 1},
-  L"BT AI Equalizer APO",
-  L"Real-time DSP enhancement (BT Audio)"
+  static_cast<APO_FLAG>(APO_FLAG_DEFAULT | APO_FLAG_INPLACE),
+  L"BT AI Equalizer APO",              // szFriendlyName[256]
+  L"Copyright (c) 2026 BT Audio",      // szCopyrightInfo[256]
+  1, 0,                                // u32MajorVersion, u32MinorVersion
+  1, 1,                                // min/max input connections
+  1, 1,                                // min/max output connections
+  1,                                   // u32MaxInstances
+  1,                                   // u32NumAPOInterfaces
+  { IID_IAudioProcessingObject }       // iidAPOInterfaceList[1]
 };
 
 class BtAiEqApo final : public IAudioProcessingObject,
                         public IAudioProcessingObjectRT,
-                        public IAudioProcessingObjectControls {
+                        public IAudioProcessingObjectConfiguration {
  public:
   // ----- IUnknown -----
   STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
@@ -60,8 +59,8 @@ class BtAiEqApo final : public IAudioProcessingObject,
       *ppv = static_cast<IAudioProcessingObject*>(this);
     } else if (riid == __uuidof(IAudioProcessingObjectRT)) {
       *ppv = static_cast<IAudioProcessingObjectRT*>(this);
-    } else if (riid == __uuidof(IAudioProcessingObjectControls)) {
-      *ppv = static_cast<IAudioProcessingObjectControls*>(this);
+    } else if (riid == __uuidof(IAudioProcessingObjectConfiguration)) {
+      *ppv = static_cast<IAudioProcessingObjectConfiguration*>(this);
     } else {
       *ppv = nullptr;
       return E_NOINTERFACE;
@@ -78,65 +77,96 @@ class BtAiEqApo final : public IAudioProcessingObject,
   }
 
   // ----- IAudioProcessingObject -----
-  STDMETHODIMP GetLatency(HNS* pTime) override {
-    if (!pTime) return E_POINTER;
-    *pTime = 0;  // in-place APO adds no algorithmic delay beyond the block
-    return S_OK;
-  }
-
-  STDMETHODIMP GetRegistrationProperties(APO_REG_PROPERTIES** pRegProps) override {
-    if (!pRegProps) return E_POINTER;
-    *pRegProps = static_cast<APO_REG_PROPERTIES*>(
-        CoTaskMemAlloc(sizeof(APO_REG_PROPERTIES)));
-    if (!*pRegProps) return E_OUTOFMEMORY;
-    std::memcpy(*pRegProps, &kRegProps, sizeof(APO_REG_PROPERTIES));
-    return S_OK;
-  }
-
-  STDMETHODIMP Initialize(UINT32 cbDataSize, const BYTE* pbyData) override {
-    // optional init blob from registration — accept empty
-    (void)cbDataSize;
-    (void)pbyData;
-    return S_OK;
-  }
-
-  STDMETHODIMP IsInputFormatSupported(const APOConnectionProperty* pOutputFormat,
-                                     const APOConnectionProperty* pRequestedInputFormat,
-                                     APOConnectionProperty** ppSupportedInputFormat) override {
-    return IsFormatSupported(pRequestedInputFormat, ppSupportedInputFormat);
-  }
-
-  STDMETHODIMP IsOutputFormatSupported(const APOConnectionProperty* pInputFormat,
-                                      const APOConnectionProperty* pRequestedOutputFormat,
-                                      APOConnectionProperty** ppSupportedOutputFormat) override {
-    return IsFormatSupported(pRequestedOutputFormat, ppSupportedOutputFormat);
-  }
-
-  STDMETHODIMP GetInputConnectionProperties(const APOConnectionProperty* pOutputFormat,
-                                           APOConnectionProperty** ppInputFormat) override {
-    return CopyFormat(pOutputFormat, ppInputFormat);
-  }
-
-  STDMETHODIMP GetOutputConnectionProperties(const APOConnectionProperty* pInputFormat,
-                                            APOConnectionProperty** ppOutputFormat) override {
-    return CopyFormat(pInputFormat, ppOutputFormat);
-  }
-
   STDMETHODIMP Reset() override {
     dsp_ = bt_apo::ApoDsp();
     configured_ = false;
     return S_OK;
   }
 
-  // ----- IAudioProcessingObjectRT (real-time thread — no alloc/lock/IO) -----
+  STDMETHODIMP GetLatency(HNSTIME* pTime) override {
+    if (!pTime) return E_POINTER;
+    *pTime = 0;  // in-place APO adds no algorithmic delay beyond the block
+    return S_OK;
+  }
+
+  STDMETHODIMP GetRegistrationProperties(APO_REG_PROPERTIES** ppRegProps) override {
+    if (!ppRegProps) return E_POINTER;
+    *ppRegProps = static_cast<APO_REG_PROPERTIES*>(
+        CoTaskMemAlloc(sizeof(APO_REG_PROPERTIES)));
+    if (!*ppRegProps) return E_OUTOFMEMORY;
+    std::memcpy(*ppRegProps, &kRegProps, sizeof(APO_REG_PROPERTIES));
+    return S_OK;
+  }
+
+  STDMETHODIMP Initialize(UINT32 cbDataSize, BYTE* pbyData) override {
+    (void)cbDataSize;
+    (void)pbyData;
+    if (initialized_) return APOERR_ALREADY_INITIALIZED;
+    initialized_ = true;
+    return S_OK;
+  }
+
+  // We accept the mix format the engine offers (float32 PCM) unchanged.
+  STDMETHODIMP IsInputFormatSupported(IAudioMediaType* /*pOppositeFormat*/,
+                                     IAudioMediaType* pRequestedInputFormat,
+                                     IAudioMediaType** ppSupportedInputFormat) override {
+    return AcceptFormat(pRequestedInputFormat, ppSupportedInputFormat);
+  }
+
+  STDMETHODIMP IsOutputFormatSupported(IAudioMediaType* /*pOppositeFormat*/,
+                                      IAudioMediaType* pRequestedOutputFormat,
+                                      IAudioMediaType** ppSupportedOutputFormat) override {
+    return AcceptFormat(pRequestedOutputFormat, ppSupportedOutputFormat);
+  }
+
+  STDMETHODIMP GetInputChannelCount(UINT32* pu32ChannelCount) override {
+    if (!pu32ChannelCount) return E_POINTER;
+    *pu32ChannelCount = channels_;
+    return S_OK;
+  }
+
+  // ----- IAudioProcessingObjectConfiguration -----
+  STDMETHODIMP LockForProcess(UINT32 u32NumInputConnections,
+                              APO_CONNECTION_DESCRIPTOR** ppInputConnections,
+                              UINT32 u32NumOutputConnections,
+                              APO_CONNECTION_DESCRIPTOR** ppOutputConnections) override {
+    if (u32NumInputConnections < 1 || u32NumOutputConnections < 1) {
+      return APOERR_NUM_CONNECTIONS_INVALID;
+    }
+    if (!ppInputConnections || !ppOutputConnections) return E_POINTER;
+
+    // learn channels / sample rate from the negotiated input format
+    if (ppInputConnections[0] && ppInputConnections[0]->pFormat) {
+      const WAVEFORMATEX* fmt = ppInputConnections[0]->pFormat->GetAudioFormat();
+      if (fmt) {
+        channels_ = fmt->nChannels > 2 ? 2 : (int)fmt->nChannels;
+        frameRate_ = (int)fmt->nSamplesPerSec;
+      }
+    }
+    locked_ = true;
+    return S_OK;
+  }
+
+  STDMETHODIMP UnlockForProcess() override {
+    if (!locked_) return APOERR_ALREADY_UNLOCKED;
+    locked_ = false;
+    return S_OK;
+  }
+
+  // ----- IAudioProcessingObjectRT (real-time thread: no alloc/lock/IO) -----
   STDMETHODIMP_(void) APOProcess(UINT32 u32NumInputConnections,
-                                 APOConnectionProperty** ppInputConnections,
+                                 APO_CONNECTION_PROPERTY** ppInputConnections,
                                  UINT32 u32NumOutputConnections,
-                                 APOConnectionProperty** ppOutputConnections) override {
+                                 APO_CONNECTION_PROPERTY** ppOutputConnections) override {
     if (u32NumInputConnections < 1 || u32NumOutputConnections < 1) return;
-    auto* in = ppInputConnections[0];
-    auto* out = ppOutputConnections[0];
-    if (!in || !out || !in->pBuffer || !out->pBuffer) return;
+    if (!ppInputConnections || !ppOutputConnections) return;
+    APO_CONNECTION_PROPERTY* in = ppInputConnections[0];
+    APO_CONNECTION_PROPERTY* out = ppOutputConnections[0];
+    if (!in || !out) return;
+
+    const UINT32 frames = in->u32ValidFrameCount;
+    out->u32ValidFrameCount = frames;
+    out->u32BufferFlags = in->u32BufferFlags;
 
     // cheap config poll (atomic load; memcpy only when version changed)
     const uint32_t v = configVersion_.load(std::memory_order_acquire);
@@ -150,48 +180,39 @@ class BtAiEqApo final : public IAudioProcessingObject,
       }
     }
 
-    const UINT32 frames = in->u32ValidFrameCount;
-    out->u32ValidFrameCount = frames;
-    out->u32BufferFlags = in->u32BufferFlags;
+    float* dst = reinterpret_cast<float*>(out->pBuffer);
+    const float* src = reinterpret_cast<const float*>(in->pBuffer);
+    if (!dst || !src) return;
 
+    if (dst != src) {
+      std::memcpy(dst, src, (size_t)frames * channels_ * sizeof(float));
+    }
     if (configured_) {
-      dsp_.process(static_cast<float*>(out->pBuffer), (int)frames);
-    } else if (out->pBuffer != in->pBuffer) {
-      std::memcpy(out->pBuffer, in->pBuffer,
-                  frames * channels_ * sizeof(float));
+      dsp_.process(dst, (int)frames);
     }
   }
 
-  // ----- IAudioProcessingObjectControls -----
-  STDMETHODIMP LockForProcess() override { locked_ = true; return S_OK; }
-  STDMETHODIMP UnlockForProcess() override { locked_ = false; return S_OK; }
+  STDMETHODIMP_(UINT32) CalcInputFrames(UINT32 u32OutputFrameCount) override {
+    return u32OutputFrameCount;  // 1:1 processing
+  }
 
-  // called by the audio engine before processing begins
-  void SetFormat(int frameRate, int channels) {
-    frameRate_ = frameRate;
-    channels_ = channels > 2 ? 2 : channels;
+  STDMETHODIMP_(UINT32) CalcOutputFrames(UINT32 u32InputFrameCount) override {
+    return u32InputFrameCount;
   }
 
  private:
   virtual ~BtAiEqApo() = default;
 
-  static HRESULT CopyFormat(const APOConnectionProperty* src,
-                            APOConnectionProperty** dst) {
-    if (!src || !dst) return E_POINTER;
-    *dst = static_cast<APOConnectionProperty*>(
-        CoTaskMemAlloc(sizeof(APOConnectionProperty)));
-    if (!*dst) return E_OUTOFMEMORY;
-    std::memcpy(*dst, src, sizeof(APOConnectionProperty));
+  static HRESULT AcceptFormat(IAudioMediaType* requested, IAudioMediaType** supported) {
+    if (!supported) return E_POINTER;
+    if (!requested) return E_POINTER;
+    requested->AddRef();
+    *supported = requested;  // accept the engine's float32 mix format as-is
     return S_OK;
   }
 
-  static HRESULT IsFormatSupported(const APOConnectionProperty* requested,
-                                   APOConnectionProperty** supported) {
-    return CopyFormat(requested, supported);
-  }
-
   bool TryLoadConfig(bt_apo::ApoParams* out, uint32_t* size) {
-    // file mapping opened once (outside RT); reads are plain memcpy
+    // file mapping opened once (outside RT); RT reads are plain memcpy
     if (!mapped_) {
       HANDLE h = CreateFileW(L"C:\\ProgramData\\BT-AI-Equalizer\\apo-config.bin",
                              GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -205,8 +226,8 @@ class BtAiEqApo final : public IAudioProcessingObject,
       if (!mapped_) return false;
     }
     const auto* hdr = static_cast<const uint32_t*>(mapped_);
-    // layout: [magic u32][version u32][size u32][payload…]
-    if (hdr[0] != 0x42544150) return false;  // "BTAP"
+    // layout: [magic u32 = 'BTAP'][version u32][size u32][payload…]
+    if (hdr[0] != 0x42544150) return false;
     *size = hdr[2];
     std::memcpy(out, static_cast<const uint8_t*>(mapped_) + 12,
                 sizeof(bt_apo::ApoParams) < *size ? sizeof(bt_apo::ApoParams) : *size);
@@ -219,13 +240,14 @@ class BtAiEqApo final : public IAudioProcessingObject,
   void* mapped_ = nullptr;
   bt_apo::ApoDsp dsp_;
   bool configured_ = false;
+  bool initialized_ = false;
   bool locked_ = false;
   int frameRate_ = 48000;
   int channels_ = 2;
 };
 
 // ---------------------------------------------------------------------------
-// COM factory + registration (self-registering DLL)
+// COM factory + self-registration
 // ---------------------------------------------------------------------------
 
 class BtApoFactory : public IClassFactory {
