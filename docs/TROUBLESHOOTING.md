@@ -41,11 +41,35 @@ engine falls back to classic loopback and reports it. With classic loopback,
 render to a **different** device than the one you capture (e.g. a virtual
 cable), or you will hear feedback/doubling.
 
-## I hear the audio twice / echo
+## I hear the audio twice / echo / it sounds hollow or harsh
 
-You are rendering into the same endpoint that classic loopback captures.
-Either switch to Enhanced Path (`process-loopback`), or render to a virtual
-cable and make the cable the default playback device.
+First identify which path you are on (Devices → Audio Routing):
+
+- **Enhanced Path (default, `process-loopback`):** doubling is *expected*.
+  WASAPI loopback is a tap, not a reroute: Windows keeps playing the original
+  app audio while BT renders its processed copy to the same device. The two
+  copies arrive at slightly different delays and comb-filter — hollow/harsh,
+  often misread as "too much treble" — and the summed level can clip the
+  output. The app shows a warning banner while this route is active.
+  Quick check: while audio plays, press **Stop** in the app. If the sound
+  instantly becomes clean, you were hearing the doubled signal. (Bypass does
+  **not** remove the double — both copies keep playing.) Fix: use Virtual
+  Cable mode (below) for clean single-copy sound.
+- **Classic loopback fallback** ("process-loopback activation failed"): you
+  are rendering into the same endpoint the loopback captures. Render to a
+  **different** device than the one you capture (e.g. a virtual cable).
+- **Virtual Cable mode:** doubling here means the apps are not playing into
+  the cable. Set the cable as the Windows **default playback device** and
+  keep BT's render device on your real speakers/headphones.
+
+### Virtual Cable mode setup (clean single-copy sound)
+
+1. Install a virtual cable driver yourself (e.g. VB-CABLE — free, signed).
+2. Windows Sound settings → set **CABLE Input** as the default playback
+   device (every app now renders into the cable, which is not audible).
+3. In the app: Devices → Audio Routing → **Loopback to virtual cable**,
+   capture = the cable's output, render device = your real speakers.
+4. All system audio flows apps → cable → BT DSP → speakers: one copy.
 
 ## No sound after enabling processing
 

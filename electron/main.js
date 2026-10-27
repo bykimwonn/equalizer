@@ -8,7 +8,7 @@
  *    file fallback when the OS store is unavailable — the UI labels which)
  *  - IPC limited to the preload allowlist
  */
-import { app, BrowserWindow, Tray, Menu, nativeImage, globalShortcut, ipcMain, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, Tray, Menu, nativeImage, globalShortcut, ipcMain, safeStorage, shell, screen } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SettingsStore, machineKeyCryptor } from './settings-store.js';
@@ -39,11 +39,18 @@ function createSafeStorageCryptor(configDir) {
 }
 
 function createWindow() {
+  // Fit the window inside the visible work area. A fixed 1360×860 window is
+  // taller than the usable space on common 1366×768 laptops, pushing the
+  // bottom of the UI off-screen where it cannot be reached (the app shell is
+  // intentionally non-scrolling — only the content area scrolls).
+  const wa = screen.getPrimaryDisplay().workAreaSize;
+  const width = Math.min(1360, Math.max(960, wa.width - 24));
+  const height = Math.min(860, Math.max(600, wa.height - 24));
   mainWindow = new BrowserWindow({
-    width: 1360,
-    height: 860,
-    minWidth: 1100,
-    minHeight: 700,
+    width,
+    height,
+    minWidth: Math.min(1100, width),
+    minHeight: Math.min(700, height),
     backgroundColor: '#0b0d10',
     show: false,
     autoHideMenuBar: true,
@@ -58,6 +65,13 @@ function createWindow() {
   });
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
+
+  // Pin renderer zoom at 100%: accidental Ctrl+wheel / Ctrl+plus zoom would
+  // scale the fixed layout and push content beyond the non-scrolling shell.
+  mainWindow.webContents.setZoomFactor(1);
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.setZoomFactor(1);
+  });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     // external links open in the system browser, never inside the app

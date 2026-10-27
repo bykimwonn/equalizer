@@ -37,7 +37,7 @@ real playback.
 
 | Capability | Implementation |
 | --- | --- |
-| System audio capture | WASAPI **process-loopback** capture excluding the BT process tree (no feedback), or classic loopback + virtual cable |
+| System audio capture | WASAPI **process-loopback** capture excluding the BT process tree (no feedback; note the original still plays — see limitations), or classic loopback + virtual cable |
 | System-wide processing | Optional **APO DLL** path (Equalizer-APO-style) — `native/apo`, see docs/INSTALL-WINDOWS.md |
 | DSP engine | `engine/` — RBJ biquad parametric EQ, harmonic bass enhancer, clarity/transient stage, soft-knee compressor (±2-band), M/S stereo, loudness trim, peak limiter |
 | Analysis | FFT (Hann), band energies, spectral centroid/rolloff/flux, RMS/peak/crest, K-weighted loudness estimate, clip detection |
@@ -69,7 +69,10 @@ real playback.
    `DisableProtectedAudioDG` override) or a virtual audio cable (third-party
    signed driver). The default Enhanced Path covers everything played by the
    system except audio from BT AI Equalizer itself (by design — excluded to
-   prevent feedback).
+   prevent feedback). But it is a *tap*, not a reroute: the original apps'
+   audio keeps playing alongside BT's processed copy, so you hear both
+   (doubling/comb-filtering). The app warns about this at runtime; use the
+   Virtual Cable mode for clean single-copy sound.
 3. **AI keys are yours.** The app is fully usable without them (local DSP,
    profiles, and local adaptive rules always work).
 

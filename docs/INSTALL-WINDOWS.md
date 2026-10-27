@@ -52,11 +52,18 @@ Troubleshooting: see docs/TROUBLESHOOTING.md §Native module.
 
 | Mode | What you get | Extra requirements |
 | --- | --- | --- |
-| **Enhanced Path** (default) | All system audio except BT's own output is captured (process-loopback, excl. BT process tree), enhanced, rendered to your device | Windows 10 build 20348+ |
-| **Virtual Cable** | True system-wide loopback → DSP → virtual cable | Install e.g. VB-CABLE yourself; set cable as default playback |
-| **System-wide APO** | All audio on the endpoint processed inside `audiodg.exe` | §4 |
+| **Enhanced Path** (default) | All system audio except BT's own output is captured (process-loopback, excl. BT process tree), enhanced, rendered to your device. **Warning: the original apps also keep playing — you hear both copies (doubling/comb-filtering).** Best for experimentation, not for clean listening | Windows 10 build 20348+ |
+| **Virtual Cable** | Clean single-copy sound: apps play into the cable (set cable as default playback), BT captures the cable and enhances onto your real device | Install e.g. VB-CABLE yourself; set cable as default playback |
+| **System-wide APO** | All audio on the endpoint processed inside `audiodg.exe` — in-place, single copy | §4 |
 
 The app **never changes your default playback device** by itself.
+
+> **Why does the Enhanced Path double the audio?** WASAPI loopback capture is
+> a *tap*, not a reroute: Windows keeps rendering the captured apps' original
+> stream while BT renders its processed copy to the same device. Both copies
+> are audible and arrive at slightly different delays — the comb-filtering
+> sounds hollow/harsh ("too much treble"). Use the Virtual Cable mode for a
+> clean single-copy path today, or install the APO (§4) for in-place DSP.
 
 ## 4. APO installation (system-wide) — precise status
 

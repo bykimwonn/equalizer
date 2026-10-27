@@ -30,15 +30,21 @@ export default function Devices() {
 
   const routingExplain = {
     'process-loopback':
-      'WASAPI process loopback capture (Windows 10 build 20348+) of the system audio stream with the BT process tree excluded, processed locally, rendered to the selected output. No feedback loop because our own render is excluded from the capture. This is the default enhanced path.',
+      'WASAPI process loopback capture (Windows 10 build 20348+) of the system audio stream with the BT process tree excluded, processed locally, rendered to the selected output. No feedback loop — but note it is a TAP, not a reroute: the original app audio also keeps playing on the device, so you hear both copies (doubling/comb-filtering). Fine for experimentation; use the virtual-cable or APO path for clean single-copy sound.',
     'loopback-to-cable':
-      'Classic WASAPI endpoint loopback capture, processed locally, rendered to a virtual audio cable (e.g. VB-CABLE). Set the cable as the default Windows playback device to enhance all system audio through it. Requires a virtual cable driver to be installed.',
+      'Recommended for clean sound. Classic WASAPI endpoint loopback capture, processed locally, rendered to the selected output while the ORIGINAL apps play to a virtual audio cable (e.g. VB-CABLE). Set the cable as the default Windows playback device to enhance all system audio through it. Single copy — no doubling. Requires a virtual cable driver (free) to be installed.',
     apo:
-      'Windows Audio Processing Object (APO) loaded into the Windows audio engine (audiodg.exe) on the output endpoint — the Equalizer-APO-style system-wide path. Requires registration (admin) and, for unsigned builds, test signing or DisableProtectedAudioDG. See docs/INSTALL-WINDOWS.md.'
+      'Windows Audio Processing Object (APO) loaded into the Windows audio engine (audiodg.exe) on the output endpoint — the Equalizer-APO-style system-wide path. In-place DSP, single copy, no capture at all. Requires registration (admin) and, for unsigned builds, test signing or DisableProtectedAudioDG. See docs/INSTALL-WINDOWS.md.'
   };
 
   return (
     <div className="grid">
+      {engineStatus.duplication && engineStatus.state === 'running' && (
+        <div className="banner warn span-2" role="alert">
+          <strong>Heads up — you are hearing two copies of the audio.</strong>{' '}
+          {engineStatus.duplication.message}
+        </div>
+      )}
       <Panel
         title="Audio Routing"
         sub="How captured audio is enhanced and delivered to your output device"
