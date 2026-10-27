@@ -36,7 +36,7 @@ Causes & fixes:
 
 ## Start fails with “process-loopback activation failed”
 
-Your Windows build predates 2004 (19041) or the activation API refused. The
+Your Windows build predates build 20348 or the activation API refused. The
 engine falls back to classic loopback and reports it. With classic loopback,
 render to a **different** device than the one you capture (e.g. a virtual
 cable), or you will hear feedback/doubling.

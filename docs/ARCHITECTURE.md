@@ -45,7 +45,7 @@ from creates feedback. BT AI Equalizer implements three honest modes:
 
 - Capture: `ActivateAudioInterfaceAsync` +
   `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK` +
-  `PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE` (Windows 10 2004+),
+  `PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE` (Windows 10 build 20348+),
   targeting the BT process tree. The capture therefore contains the system mix
   **minus BT's own render stream** → processing + rendering to the same
   endpoint is feedback-free by construction.

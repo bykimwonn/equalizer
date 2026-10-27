@@ -8,7 +8,7 @@ Windows machine in the development sandbox — status labels are exact.**
 
 | Component | Requirement |
 | --- | --- |
-| OS | Windows 10 2004 (build 19041)+ recommended (needed for process-loopback); Windows 11 fully supported |
+| OS | Windows 10 build 20348+ recommended (needed for process-loopback); Windows 11 fully supported |
 | Runtime | none — the app is packaged with Electron |
 | Build machine (dev) | Node 20+, Python 3, VS 2022 Build Tools (C++ workload), Windows 10/11 SDK |
 | Privileges | normal user for the app; **Administrator** only for APO registration |
@@ -52,7 +52,7 @@ Troubleshooting: see docs/TROUBLESHOOTING.md §Native module.
 
 | Mode | What you get | Extra requirements |
 | --- | --- | --- |
-| **Enhanced Path** (default) | All system audio except BT's own output is captured (process-loopback, excl. BT process tree), enhanced, rendered to your device | Windows 10 2004+ |
+| **Enhanced Path** (default) | All system audio except BT's own output is captured (process-loopback, excl. BT process tree), enhanced, rendered to your device | Windows 10 build 20348+ |
 | **Virtual Cable** | True system-wide loopback → DSP → virtual cable | Install e.g. VB-CABLE yourself; set cable as default playback |
 | **System-wide APO** | All audio on the endpoint processed inside `audiodg.exe` | §4 |
 

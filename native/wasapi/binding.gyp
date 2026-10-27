@@ -29,7 +29,8 @@
               "NOMINMAX",
               "WIN32_LEAN_AND_MEAN",
               "UNICODE",
-              "_UNICODE"
+              "_UNICODE",
+              "NTDDI_VERSION=0x0A00000C"
             ]
           },
           {
