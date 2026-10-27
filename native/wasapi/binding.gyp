@@ -11,7 +11,7 @@
               "wasapi_engine.cc"
             ],
             "include_dirs": [
-              "<!@(node -p \"require('node-addon-api').include_dir\")"
+              "<!@(node -p \"require('node-addon-api').include\")"
             ],
             "libraries": [
               "-lole32.lib",
@@ -35,7 +35,7 @@
           {
             "sources": ["stub_unsupported.cc"],
             "include_dirs": [
-              "<!@(node -p \"require('node-addon-api').include_dir\")"
+              "<!@(node -p \"require('node-addon-api').include\")"
             ]
           }
         ]

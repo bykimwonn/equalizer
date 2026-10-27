@@ -2,7 +2,7 @@
 
 ## Test suite map (`npm test` → `node --test tests/*.test.js`)
 
-**98 automated tests, all executed in the development sandbox (Linux, Node 22).**
+**110 automated tests, all executed in the development sandbox (Linux, Node 22).**
 
 | File | What it proves | Kind |
 | --- | --- | --- |
@@ -13,10 +13,12 @@
 | `tests/chain.test.js` | Bypass bit-exactness, flat chain transparency, 8 dB EQ measured through full chain (±0.8 dB), limiter holds ceiling under extreme bass boost, click-free parameter steps (maxΔ bound), multiband path finite, sample-rate reconfig, width-0 mono fold, NaN/Inf guards | DSP |
 | `tests/validate.test.js` | AI payload: clamping with warnings, NaN/string rejection, prototype-pollution immunity, unknown-key stripping, band-index errors isolated, proposal JSON parsing (fenced/prose/garbage), boolean strictness | AI safety |
 | `tests/controller.test.js` | All 15 profiles valid & applyable, clip guard, feedback adjustments, hybrid pending/apply/reject, adaptive auto-apply, invalid proposals never applied, AI failure isolation, undo/reset, manual mode inert | Integration |
-| `tests/store.test.js` | Settings persistence across instances, **keys never appear in any file**, custom profile lifecycle, feedback cap/reset, corrupt-file recovery, atomic writes under concurrency | Integration |
+| `tests/store.test.js` | Settings persistence across instances, **keys never appear in any file**, custom profile lifecycle, feedback cap/reset, corrupt-file recovery, Windows-FS-safe write queue (serialized, rename-with-retry + copy fallback), lossless concurrent updates, shutdown flush | Integration |
 | `tests/ai.test.js` | Unconfigured rejection, groq path with identity, **fallback groq→gemini**, no-fallback isolation, malformed output rejection, unsafe values clamped pre-return, throttling, live-model listing, compact feature summaries (no raw audio) | Integration (mock transport) |
 | `tests/ipc.test.js` | Preload allowlist ≡ main-process allowlist, no duplicates, unknown channels refused, handlers validate input and return `{ok:false}` | Security |
-| `tests/engine-host.test.js` | **Honest failure** on non-Windows WASAPI start, full simulation loop: real DSP processing → telemetry, settings round-trip, bypass, diagnostics, mode persistence, clip guard in the loop | Integration |
+| `tests/engine-host.test.js` | **Honest failure** on non-Windows WASAPI start, full simulation loop: real DSP processing → telemetry, settings round-trip, bypass, diagnostics, mode persistence, clip guard in the loop, APO config kept in sync with settings | Integration |
+| `tests/apo-config.test.js` | Packed APO config contract: 12-byte header + 216-byte payload layout exact (offsets match the C++ struct, padding-free), byte-exact round-trip, ceiling clamp never hotter than −0.5 dBFS, garbage/truncated buffers rejected, profiles serialize | Contract |
+| `tests/native-binding.test.js` | `binding.gyp` wires node-addon-api via the absolute `.include` recipe in every OS branch; the `<!@` expansion is absolute, contains `napi.h`, and is cwd-independent — guards the MSVC `C1083: napi.h` regression | Build |
 
 ## How to reproduce
 

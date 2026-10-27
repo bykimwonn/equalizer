@@ -15,6 +15,25 @@ Causes & fixes:
    `npm run build:native` (node-gyp compiles against the local Node/Electron
    headers; if `electron-rebuild` is used in your environment, run it too).
 
+## `npm run build:native` fails with `C1083: Cannot open include file: 'napi.h'`
+
+**Symptom:** MSBuild starts compiling `wasapi_module.cc` but dies on the
+`napi.h` include.
+
+Causes & fixes:
+
+1. **Incomplete `node_modules`** — `node-addon-api` is missing or damaged.
+   Run `npm install`, then `npm run build:native` again. The build script now
+   verifies `napi.h` first and fails fast with an honest message if it is
+   absent, printing the resolved include dir.
+2. **Stale build config** — an earlier configure cached a bad include path.
+   Delete `native\wasapi\build\` and rebuild.
+3. **Old checkout (`.include_dir` bug)** — builds before 2026-10-27 used
+   node-addon-api's cwd-relative `.include_dir`, which gyp/MSBuild cannot
+   resolve (`shlex` eats the backslashes, and the vcxproj resolves relative
+   includes against `build\`). Fixed by switching to the absolute `.include`
+   recipe — guarded by `tests/native-binding.test.js`. Run `git pull`.
+
 ## Start fails with “process-loopback activation failed”
 
 Your Windows build predates 2004 (19041) or the activation API refused. The
