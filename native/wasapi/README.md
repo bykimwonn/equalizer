@@ -9,11 +9,13 @@ WASAPI capture/render addon for BT AI Equalizer.
     with `PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE` targeting the BT
     process tree. Captures the Windows audio mix **except our own render
     stream**, so processing + rendering to the same endpoint has **no feedback
-    loop**. Requires Windows 10 2004 (build 19041)+.
+    loop**. Requires Windows 10 build 20348+ (`audioclientactivationparams.h`).
   - `loopback`: classic endpoint loopback (`AUDCLNT_STREAMFLAGS_LOOPBACK`).
     Use together with a virtual audio cable render target.
-- **Render**: shared-mode WASAPI (float32/PCM16), event-driven, to any render
-  endpoint (or the system default).
+- **Render**: shared-mode WASAPI, event-driven, to any render endpoint (or the
+  system default). Both streams use a fixed float32 stereo DSP format with
+  `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`, so the engine converts to/from each
+  endpoint's mix format.
 - **DSP hand-off**: the audio thread captures one period, calls the JS
   `process(L, R)` callback synchronously through a blocking
   `Napi::ThreadSafeFunction`, then renders the processed buffers. The JS side

@@ -2,32 +2,42 @@
  * bt_wasapi — WASAPI capture/render engine (Windows only).
  *
  * Capture modes:
- *  - "process-loopback" (default): uses the documented
- *    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK with
- *    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE targeting the BT
- *    process tree. Captures the system audio mix EXCEPT our own render
+ *  - "process-loopback" (default): documented
+ *    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK via
+ *    ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, ...)
+ *    with PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE targeting the BT
+ *    process tree — captures the system audio mix EXCEPT our own render
  *    stream, so processing and rendering to the same device creates no
- *    feedback loop. Available on Windows 10 2004+ (build 19041).
- *  - "loopback": classic endpoint loopback (AUDCLNT_STREAMFLAGS_LOOPBACK)
- *    of the selected/default render endpoint. Use with a virtual cable
- *    render target to avoid feedback.
+ *    feedback loop. Requires Windows 10 build 20348+ (audioclientactivationparams.h).
+ *    Note: the activated client's GetMixFormat returns E_NOTIMPL by design
+ *    (it is not tied to an endpoint); the stream format is chosen explicitly.
+ *  - "loopback": classic endpoint loopback (AUDCLNT_STREAMFLAGS_LOOPBACK) of
+ *    the selected/default render endpoint. Use with a virtual cable render
+ *    target to avoid feedback.
  *
- * Render: shared-mode WASAPI float32, event-driven, same mix format as the
- * endpoint (we convert to/from stereo float32 deinterleaved for the DSP).
+ * Both capture and render streams are opened in a fixed DSP format (float32
+ * stereo at the configured sample rate) with AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+ * so the audio engine performs any needed rate/format conversion. Streams are
+ * event-driven; the audio thread drains capture packets (one synchronous JS
+ * process callback per block), stages the processed audio in a small FIFO, and
+ * feeds the render stream from it (silence when empty).
  *
  * Real-time safety: the audio thread captures one period, hands it to the JS
- * process callback synchronously (blocking ThreadSafeFunction), then renders
- * the processed buffer. No locks beyond a small state mutex around start/stop.
+ * process callback synchronously (blocking ThreadSafeFunction), then renders.
+ * No locks beyond a small state mutex around start/stop.
  */
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
-#include <audiopolicy.h>
+#include <audioclientactivationparams.h>
 #include <mmreg.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <avrt.h>
 #include <objbase.h>
+#include <wrl/client.h>
+#include <wrl/implements.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <memory>
@@ -40,6 +50,54 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "mmdevapi.lib")
 #pragma comment(lib, "avrt.lib")
+
+namespace {
+
+using Microsoft::WRL::ClassicCom;
+using Microsoft::WRL::ComPtr;
+using Microsoft::WRL::FtmBase;
+using Microsoft::WRL::Make;
+using Microsoft::WRL::RuntimeClass;
+using Microsoft::WRL::RuntimeClassFlags;
+
+// Completion handler for ActivateAudioInterfaceAsync. Windows delivers
+// ActivateCompleted on an MTA worker thread, so — as in Microsoft's
+// ApplicationLoopback sample — the handler is agile (RuntimeClass + FtmBase).
+class ActivationHandler
+    : public RuntimeClass<RuntimeClassFlags<ClassicCom>, FtmBase,
+                          IActivateAudioInterfaceCompletionHandler> {
+ public:
+  ActivationHandler() : event_(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {}
+  ~ActivationHandler() {
+    if (event_) CloseHandle(event_);
+  }
+
+  STDMETHOD(ActivateCompleted)(IActivateAudioInterfaceAsyncOperation* operation) override {
+    resultHr_ = E_FAIL;
+    if (operation) {
+      HRESULT hrActivate = E_UNEXPECTED;
+      ComPtr<IUnknown> punk;
+      if (SUCCEEDED(operation->GetActivateResult(&hrActivate, &punk))) {
+        resultHr_ = SUCCEEDED(hrActivate) ? punk.As(&client_) : hrActivate;
+      }
+    }
+    if (event_) SetEvent(event_);
+    return S_OK;
+  }
+
+  bool Wait(DWORD ms) {
+    return event_ && WaitForSingleObject(event_, ms) == WAIT_OBJECT_0;
+  }
+  HRESULT result() const { return resultHr_; }
+  ComPtr<IAudioClient>& client() { return client_; }
+
+ private:
+  HANDLE event_ = nullptr;
+  HRESULT resultHr_ = E_UNEXPECTED;
+  ComPtr<IAudioClient> client_;
+};
+
+}  // namespace
 
 namespace bt {
 
@@ -63,11 +121,6 @@ static std::string Narrow(const std::wstring& w) {
   return s;
 }
 
-static bool GuidFromString(const std::string& s, GUID* out) {
-  std::wstring w = Widen(s);
-  return SUCCEEDED(CLSIDFromString(w.c_str(), out));
-}
-
 // ---------------------------------------------------------------------------
 // Device enumeration
 // ---------------------------------------------------------------------------
@@ -76,21 +129,20 @@ std::vector<DeviceInfo> EnumerateDevices() {
   std::vector<DeviceInfo> out;
   ComPtr<IMMDeviceEnumerator> enumerator;
   if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-                              __uuidof(IMMDeviceEnumerator),
-                              (void**)enumerator.put()))) {
+                              IID_PPV_ARGS(&enumerator)))) {
     return out;
   }
 
   for (int flow = 0; flow < 2; ++flow) {
     EDataFlow dataFlow = flow == 0 ? eRender : eCapture;
     ComPtr<IMMDeviceCollection> coll;
-    if (FAILED(enumerator->EnumAudioEndpoints(dataFlow, DEVICE_STATE_ACTIVE, coll.put()))) continue;
+    if (FAILED(enumerator->EnumAudioEndpoints(dataFlow, DEVICE_STATE_ACTIVE, &coll))) continue;
 
     UINT count = 0;
     coll->GetCount(&count);
     for (UINT i = 0; i < count; ++i) {
       ComPtr<IMMDevice> dev;
-      if (FAILED(coll->Item(i, dev.put()))) continue;
+      if (FAILED(coll->Item(i, &dev))) continue;
 
       LPWSTR id = nullptr;
       dev->GetId(&id);
@@ -99,7 +151,7 @@ std::vector<DeviceInfo> EnumerateDevices() {
       if (id) CoTaskMemFree(id);
 
       ComPtr<IPropertyStore> props;
-      if (SUCCEEDED(dev->OpenPropertyStore(STGM_READ, props.put()))) {
+      if (SUCCEEDED(dev->OpenPropertyStore(STGM_READ, &props))) {
         PROPVARIANT var;
         PropVariantInit(&var);
         if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &var)) && var.pwszVal) {
@@ -110,11 +162,11 @@ std::vector<DeviceInfo> EnumerateDevices() {
 
       info.isRender = (dataFlow == eRender);
       info.isCapture = (dataFlow == eCapture);
-      info.loopbackSupported = info.isRender; // render endpoints can be loopback-captured
+      info.loopbackSupported = info.isRender;  // render endpoints can be loopback-captured
 
       // default device?
       ComPtr<IMMDevice> def;
-      if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(dataFlow, eConsole, def.put()))) {
+      if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(dataFlow, eConsole, &def))) {
         LPWSTR defId = nullptr;
         def->GetId(&defId);
         if (defId) {
@@ -123,10 +175,11 @@ std::vector<DeviceInfo> EnumerateDevices() {
         }
       }
 
-      // basic capabilities from the shared mix format
+      // basic capabilities from the shared mix format (works on real endpoints —
+      // only the process-loopback virtual device returns E_NOTIMPL here)
       ComPtr<IAudioClient> client;
       if (SUCCEEDED(dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                                  (void**)client.put()))) {
+                                  reinterpret_cast<void**>(client.GetAddressOf())))) {
         WAVEFORMATEX* fmt = nullptr;
         if (SUCCEEDED(client->GetMixFormat(&fmt)) && fmt) {
           info.sampleRates = { (int)fmt->nSamplesPerSec };
@@ -162,9 +215,27 @@ bool WasapiEngine::Start(const StreamConfig& cfg, std::string* error) {
   cfg_ = cfg;
   stop_ = false;
 
-  HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-  bool coInitHere = SUCCEEDED(hr);
-  (void)coInitHere;
+  HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  (void)hrCo;  // RPC_E_CHANGED_MODE is fine — the thread is already initialized.
+
+  int rate = cfg_.sampleRate;
+  if (rate < 8000 || rate > 384000) rate = 48000;
+  dspRate_ = rate;
+  dspFormat_.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+  dspFormat_.nChannels = 2;
+  dspFormat_.nSamplesPerSec = (DWORD)rate;
+  dspFormat_.wBitsPerSample = 32;
+  dspFormat_.nBlockAlign = 8;
+  dspFormat_.nAvgBytesPerSec = (DWORD)rate * 8;
+  dspFormat_.cbSize = 0;
+
+  captureEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  renderEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (!captureEvent_ || !renderEvent_) {
+    if (error) *error = "CreateEvent failed";
+    Cleanup();
+    return false;
+  }
 
   if (!OpenCapture(error) || !OpenRender(error)) {
     Cleanup();
@@ -180,9 +251,10 @@ void WasapiEngine::Stop() {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     stop_ = true;
+    // Wake the wait immediately so the audio thread can exit promptly.
+    if (captureEvent_) SetEvent(captureEvent_);
+    if (renderEvent_) SetEvent(renderEvent_);
   }
-  if (captureClient_) captureClient_->Stop();
-  if (renderClient_) renderClient_->Stop();
   if (audioThread_.joinable()) audioThread_.join();
   std::lock_guard<std::mutex> lock(mutex_);
   running_ = false;
@@ -190,93 +262,81 @@ void WasapiEngine::Stop() {
 }
 
 void WasapiEngine::Cleanup() {
-  captureClient_.reset();
-  captureAudioClient_.reset();
-  renderClient_.reset();
-  renderAudioClient_.reset();
-  captureEvent_ = nullptr;
-  renderEvent_ = nullptr;
+  captureClient_ = nullptr;
+  captureAudioClient_ = nullptr;
+  renderClient_ = nullptr;
+  renderAudioClient_ = nullptr;
+  if (captureEvent_) { CloseHandle(captureEvent_); captureEvent_ = nullptr; }
+  if (renderEvent_) { CloseHandle(renderEvent_); renderEvent_ = nullptr; }
+  renderBufFrames_ = 0;
+  fifoL_.clear();
+  fifoR_.clear();
+  fifoHead_ = 0;
 }
 
 bool WasapiEngine::OpenCapture(std::string* error) {
-  HRESULT hr;
-
   if (cfg_.captureMode == "process-loopback") {
-    // Windows 10 2004+: per-process loopback via activation interface.
-    // EXCLUDE_TARGET_PROCESS_TREE with the BT PID captures everything except
-    // our own render stream — no feedback when rendering to the same device.
-    AUDIOCLIENT_ACTIVATION_PARAMS params = {};
-    params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
-    params.ProcessLoopbackParams.ProcessLoopbackMode =
-        PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE;
-    params.ProcessLoopbackParams.TargetProcessId = cfg_.excludePid
-        ? cfg_.excludePid
-        : GetCurrentProcessId();
-
-    AUDIOCLIENT_ACTIVATION_TYPE activationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
-    PROPVARIANT var;
-    PropVariantInit(&var);
-    var.vt = VT_BLOB;
-    var.blob.cbSize = sizeof(params);
-    var.blob.pBlobData = reinterpret_cast<BYTE*>(&params);
-
-    IAudioClient* raw = nullptr;
-    hr = ActivateAudioInterfaceAsync(
-        cfg_.captureDeviceId.empty() || cfg_.captureDeviceId == "default"
-            ? VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK
-            : Widen(cfg_.captureDeviceId).c_str(),
-        __uuidof(IAudioClient), &var, &activationAsync_.put());
-    PropVariantClear(&var);
-
-    if (SUCCEEDED(hr)) {
-      // wait (bounded) for activation completion
-      DWORD waited = 0;
-      while (!activationAsync_->IsComplete() && waited < 3000) {
-        Sleep(5);
-        waited += 5;
-      }
-      hr = activationAsync_->GetActivateResult(&activationType, (IUnknown**)&raw);
-    }
-    if (FAILED(hr) || !raw) {
-      // fall back to classic loopback so the app still captures audio
-      if (error) *error = "process-loopback activation failed (requires Windows 10 2004+); falling back to classic loopback";
+    if (!ActivateProcessLoopback(error)) {
+      // Honest fallback so the app still captures audio (classic loopback of
+      // the render endpoint; use a virtual cable to avoid feedback).
       return OpenCaptureClassic(error);
     }
-    captureAudioClient_.attach(raw);
-  } else {
-    if (!OpenCaptureClassic(error)) return false;
-  }
-
-  WAVEFORMATEX* fmt = nullptr;
-  if (FAILED(captureAudioClient_->GetMixFormat(&fmt)) || !fmt) {
-    if (error) *error = "GetMixFormat(capture) failed";
+  } else if (!OpenCaptureClassic(error)) {
     return false;
   }
-  captureRate_ = fmt->nSamplesPerSec;
-  captureChannels_ = fmt->nChannels;
-  CoTaskMemFree(fmt);
+  return InitCaptureStream(error);
+}
 
-  REFERENCE_TIME buffer = 20000 * 1000; // 20 ms default engine period request
-  hr = captureAudioClient_->Initialize(
-      AUDCLNT_SHAREMODE_SHARED,
-      AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-      buffer, 0, nullptr, nullptr);
+bool WasapiEngine::ActivateProcessLoopback(std::string* error) {
+  AUDIOCLIENT_ACTIVATION_PARAMS params = {};
+  params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+  params.ProcessLoopbackParams.ProcessLoopbackMode =
+      PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE;
+  params.ProcessLoopbackParams.TargetProcessId =
+      cfg_.excludePid ? cfg_.excludePid : GetCurrentProcessId();
+
+  PROPVARIANT var;
+  PropVariantInit(&var);
+  var.vt = VT_BLOB;
+  var.blob.cbSize = sizeof(params);
+  var.blob.pBlobData = reinterpret_cast<BYTE*>(&params);
+
+  ComPtr<ActivationHandler> handler = Make<ActivationHandler>();
+  ComPtr<IActivateAudioInterfaceAsyncOperation> asyncOp;
+  // NOTE: unlike a heap PROPVARIANT, this blob points into our stack frame —
+  // it must NOT be PropVariantClear()d (that would free the stack pointer).
+  HRESULT hr = ActivateAudioInterfaceAsync(
+      VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, __uuidof(IAudioClient), &var,
+      handler.Get(), &asyncOp);
   if (FAILED(hr)) {
-    if (error) *error = "IAudioClient::Initialize(capture) failed: " + std::to_string(hr);
+    if (error) {
+      *error = "process-loopback activation failed (requires Windows 10 build 20348+); "
+               "falling back to classic loopback (hr=" + std::to_string(hr) + ")";
+    }
     return false;
   }
-  if (FAILED(captureAudioClient_->GetService(__uuidof(IAudioCaptureClient),
-                                             (void**)captureClient_.put()))) {
-    if (error) *error = "GetService(IAudioCaptureClient) failed";
+  if (!handler->Wait(5000)) {
+    if (error) {
+      *error = "process-loopback activation timed out; falling back to classic loopback";
+    }
     return false;
   }
+  hr = handler->result();
+  if (FAILED(hr) || !handler->client()) {
+    if (error) {
+      *error = "process-loopback activation failed (requires Windows 10 build 20348+); "
+               "falling back to classic loopback (hr=" + std::to_string(hr) + ")";
+    }
+    return false;
+  }
+  captureAudioClient_ = handler->client();
   return true;
 }
 
 bool WasapiEngine::OpenCaptureClassic(std::string* error) {
   ComPtr<IMMDeviceEnumerator> enumerator;
   if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-                              __uuidof(IMMDeviceEnumerator), (void**)enumerator.put()))) {
+                              IID_PPV_ARGS(&enumerator)))) {
     if (error) *error = "MMDeviceEnumerator creation failed";
     return false;
   }
@@ -284,9 +344,9 @@ bool WasapiEngine::OpenCaptureClassic(std::string* error) {
   ComPtr<IMMDevice> dev;
   HRESULT hr;
   if (cfg_.captureDeviceId.empty() || cfg_.captureDeviceId == "default") {
-    hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, dev.put());
+    hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &dev);
   } else {
-    hr = enumerator->GetDevice(Widen(cfg_.captureDeviceId).c_str(), dev.put());
+    hr = enumerator->GetDevice(Widen(cfg_.captureDeviceId).c_str(), &dev);
   }
   if (FAILED(hr)) {
     if (error) *error = "capture device not found";
@@ -294,32 +354,30 @@ bool WasapiEngine::OpenCaptureClassic(std::string* error) {
   }
 
   hr = dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                     (void**)captureAudioClient_.put());
+                     reinterpret_cast<void**>(captureAudioClient_.GetAddressOf()));
   if (FAILED(hr)) {
     if (error) *error = "capture device Activate failed";
     return false;
   }
+  return true;
+}
 
-  // mix format must be known before Initialize for loopback
-  WAVEFORMATEX* fmt = nullptr;
-  if (SUCCEEDED(captureAudioClient_->GetMixFormat(&fmt)) && fmt) {
-    captureRate_ = fmt->nSamplesPerSec;
-    captureChannels_ = fmt->nChannels;
-    CoTaskMemFree(fmt);
-  }
-
-  REFERENCE_TIME buffer = 20000 * 1000;
-  hr = captureAudioClient_->Initialize(
+bool WasapiEngine::InitCaptureStream(std::string* error) {
+  HRESULT hr = captureAudioClient_->Initialize(
       AUDCLNT_SHAREMODE_SHARED,
-      AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-      buffer, 0, nullptr, nullptr);
+      AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
+          AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+      0, 0, &dspFormat_, nullptr);
   if (FAILED(hr)) {
-    if (error) *error = "IAudioClient::Initialize(loopback) failed: " + std::to_string(hr);
+    if (error) *error = "IAudioClient::Initialize(capture) failed: " + std::to_string(hr);
     return false;
   }
-  if (FAILED(captureAudioClient_->GetService(__uuidof(IAudioCaptureClient),
-                                             (void**)captureClient_.put()))) {
+  if (FAILED(captureAudioClient_->GetService(IID_PPV_ARGS(&captureClient_)))) {
     if (error) *error = "GetService(IAudioCaptureClient) failed";
+    return false;
+  }
+  if (FAILED(captureAudioClient_->SetEventHandle(captureEvent_))) {
+    if (error) *error = "SetEventHandle(capture) failed";
     return false;
   }
   return true;
@@ -328,7 +386,7 @@ bool WasapiEngine::OpenCaptureClassic(std::string* error) {
 bool WasapiEngine::OpenRender(std::string* error) {
   ComPtr<IMMDeviceEnumerator> enumerator;
   if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-                              __uuidof(IMMDeviceEnumerator), (void**)enumerator.put()))) {
+                              IID_PPV_ARGS(&enumerator)))) {
     if (error) *error = "MMDeviceEnumerator creation failed (render)";
     return false;
   }
@@ -336,9 +394,9 @@ bool WasapiEngine::OpenRender(std::string* error) {
   ComPtr<IMMDevice> dev;
   HRESULT hr;
   if (cfg_.renderDeviceId.empty() || cfg_.renderDeviceId == "default") {
-    hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, dev.put());
+    hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &dev);
   } else {
-    hr = enumerator->GetDevice(Widen(cfg_.renderDeviceId).c_str(), dev.put());
+    hr = enumerator->GetDevice(Widen(cfg_.renderDeviceId).c_str(), &dev);
   }
   if (FAILED(hr)) {
     if (error) *error = "render device not found";
@@ -346,35 +404,31 @@ bool WasapiEngine::OpenRender(std::string* error) {
   }
 
   hr = dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                     (void**)renderAudioClient_.put());
+                     reinterpret_cast<void**>(renderAudioClient_.GetAddressOf()));
   if (FAILED(hr)) {
     if (error) *error = "render device Activate failed";
     return false;
   }
 
-  WAVEFORMATEX* fmt = nullptr;
-  if (FAILED(renderAudioClient_->GetMixFormat(&fmt)) || !fmt) {
-    if (error) *error = "GetMixFormat(render) failed";
-    return false;
-  }
-  renderRate_ = fmt->nSamplesPerSec;
-  renderChannels_ = fmt->nChannels;
-  renderBits_ = fmt->wBitsPerSample;
-  isFloat_ = (fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) ||
-             (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
-              reinterpret_cast<WAVEFORMATEXTENSIBLE*>(fmt)->SubFormat ==
-                  KSDATAFORMAT_SUBTYPE_IEEE_FLOAT);
-  CoTaskMemFree(fmt);
-
-  REFERENCE_TIME buffer = 20000 * 1000;
-  hr = renderAudioClient_->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, buffer, 0, nullptr, nullptr);
+  hr = renderAudioClient_->Initialize(
+      AUDCLNT_SHAREMODE_SHARED,
+      AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+          AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+      0, 0, &dspFormat_, nullptr);
   if (FAILED(hr)) {
     if (error) *error = "IAudioClient::Initialize(render) failed: " + std::to_string(hr);
     return false;
   }
-  if (FAILED(renderAudioClient_->GetService(__uuidof(IAudioRenderClient),
-                                            (void**)renderClient_.put()))) {
+  if (FAILED(renderAudioClient_->GetBufferSize(&renderBufFrames_))) {
+    if (error) *error = "GetBufferSize(render) failed";
+    return false;
+  }
+  if (FAILED(renderAudioClient_->GetService(IID_PPV_ARGS(&renderClient_)))) {
     if (error) *error = "GetService(IAudioRenderClient) failed";
+    return false;
+  }
+  if (FAILED(renderAudioClient_->SetEventHandle(renderEvent_))) {
+    if (error) *error = "SetEventHandle(render) failed";
     return false;
   }
   return true;
@@ -385,104 +439,108 @@ void WasapiEngine::AudioLoop() {
   DWORD taskIndex = 0;
   HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex);
 
-  captureClient_->Start();
-  renderClient_->Start();
+  captureAudioClient_->Start();
+  renderAudioClient_->Start();
 
   std::vector<float> inL, inR, outL, outR;
 
   while (!stop_) {
-    // ---- capture one period ----
-    UINT32 packet = 0;
-    if (FAILED(captureClient_->GetNextPacketSize(&packet))) break;
+    HANDLE waits[2] = { captureEvent_, renderEvent_ };
+    DWORD w = WaitForMultipleObjects(2, waits, FALSE, 200);
+    if (w == WAIT_FAILED) break;
 
-    UINT32 frames = 0;
-    BYTE* data = nullptr;
-    DWORD flags = 0;
-    HRESULT hr = captureClient_->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
-    if (FAILED(hr)) {
-      if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
-        // device changed — recoverable; outer watchdog restarts us
+    // ---- drain every available capture packet (one wake can cover many) ----
+    UINT32 packet = 0;
+    while (!stop_ && SUCCEEDED(captureClient_->GetNextPacketSize(&packet)) && packet > 0) {
+      BYTE* data = nullptr;
+      UINT32 frames = 0;
+      DWORD flags = 0;
+      HRESULT hr = captureClient_->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
+      if (FAILED(hr)) {
+        if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+          // Device changed — stop honestly; the host reports the state.
+          stop_ = true;
+        }
         break;
       }
-      Sleep(2);
-      continue;
-    }
-
-    if (frames > 0) {
-      inL.resize(frames);
-      inR.resize(frames);
-      Deinterleave(data, frames, captureChannels_, isFloat_, inL.data(), inR.data());
-    }
-    captureClient_->ReleaseBuffer(frames);
-    if (frames == 0) {
-      Sleep(1);
-      continue;
-    }
-
-    // ---- DSP callback (synchronous; JS runs engine.process) ----
-    outL = inL;
-    outR = inR;
-    if (processCb_) {
-      processCb_(outL, outR);
-    }
-
-    // ---- render the processed block ----
-    UINT32 padding = 0;
-    renderAudioClient_->GetCurrentPadding(&padding);
-    UINT32 renderFrames = 0;
-    if (SUCCEEDED(renderAudioClient_->GetBufferSize(&renderFrames))) {
-      UINT32 want = renderFrames - padding;
-      if (want > 0) {
-        BYTE* out = nullptr;
-        UINT32 toWrite = want < (UINT32)outL.size() ? want : (UINT32)outL.size();
-        if (SUCCEEDED(renderClient_->GetBuffer(toWrite, &out)) && out) {
-          Interleave(out, toWrite, renderChannels_, isFloat_, outL.data(), outR.data());
-          renderClient_->ReleaseBuffer(toWrite, 0);
+      if (frames > 0) {
+        inL.assign(frames, 0.f);
+        inR.assign(frames, 0.f);
+        if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0 && data) {
+          Deinterleave(data, frames, inL.data(), inR.data());
         }
+        outL = inL;
+        outR = inR;
+        if (processCb_) {
+          processCb_(outL, outR);  // synchronous JS DSP, in-place
+        }
+        FifoPush(outL, outR);
       }
+      captureClient_->ReleaseBuffer(frames);
     }
+
+    // ---- feed the render stream: FIFO frames first, silence after ----
+    UINT32 padding = 0;
+    if (FAILED(renderAudioClient_->GetCurrentPadding(&padding))) continue;
+    UINT32 avail = renderBufFrames_ > padding ? renderBufFrames_ - padding : 0;
+    if (avail == 0) continue;
+
+    BYTE* out = nullptr;
+    if (FAILED(renderClient_->GetBuffer(avail, &out)) || !out) continue;
+
+    UINT32 n = (UINT32)std::min<size_t>(avail, FifoAvailable());
+    if (n > 0) {
+      Interleave(out, n, fifoL_.data() + fifoHead_, fifoR_.data() + fifoHead_);
+      FifoConsume(n);
+    }
+    if (n < avail) {
+      std::memset(out + (size_t)n * 8, 0, ((size_t)avail - n) * 8);
+    }
+    renderClient_->ReleaseBuffer(avail, n > 0 ? 0 : AUDCLNT_BUFFERFLAGS_SILENT);
   }
 
-  captureClient_->Stop();
-  renderClient_->Stop();
+  captureAudioClient_->Stop();
+  renderAudioClient_->Stop();
   if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
 }
 
-void WasapiEngine::Deinterleave(const BYTE* data, UINT32 frames, UINT32 channels,
-                                bool isFloat, float* L, float* R) {
-  if (isFloat) {
-    const float* src = reinterpret_cast<const float*>(data);
-    for (UINT32 i = 0; i < frames; ++i) {
-      L[i] = channels > 0 ? src[i * channels] : 0.f;
-      R[i] = channels > 1 ? src[i * channels + 1] : L[i];
-    }
-  } else {
-    const short* src = reinterpret_cast<const short*>(data);
-    for (UINT32 i = 0; i < frames; ++i) {
-      L[i] = channels > 0 ? src[i * channels] / 32768.f : 0.f;
-      R[i] = channels > 1 ? src[i * channels + 1] / 32768.f : L[i];
-    }
+void WasapiEngine::FifoPush(const std::vector<float>& l, const std::vector<float>& r) {
+  fifoL_.insert(fifoL_.end(), l.begin(), l.end());
+  fifoR_.insert(fifoR_.end(), r.begin(), r.end());
+  // Bound latency: keep at most one second of audio; drop oldest.
+  size_t cap = (size_t)dspRate_;
+  if (fifoL_.size() - fifoHead_ > cap) {
+    size_t keepFrom = fifoL_.size() - cap;
+    if (keepFrom > fifoHead_) FifoConsume(keepFrom - fifoHead_);
   }
 }
 
-void WasapiEngine::Interleave(BYTE* data, UINT32 frames, UINT32 channels,
-                              bool isFloat, const float* L, const float* R) {
-  if (isFloat) {
-    float* dst = reinterpret_cast<float*>(data);
-    for (UINT32 i = 0; i < frames; ++i) {
-      if (channels > 0) dst[i * channels] = L[i];
-      if (channels > 1) dst[i * channels + 1] = R[i];
-    }
-  } else {
-    short* dst = reinterpret_cast<short*>(data);
-    for (UINT32 i = 0; i < frames; ++i) {
-      auto clamp16 = [](float v) {
-        v = v > 1.f ? 1.f : (v < -1.f ? -1.f : v);
-        return (short)(v * 32767.f);
-      };
-      if (channels > 0) dst[i * channels] = clamp16(L[i]);
-      if (channels > 1) dst[i * channels + 1] = clamp16(R[i]);
-    }
+void WasapiEngine::FifoConsume(size_t n) {
+  fifoHead_ += n;
+  if (fifoHead_ >= fifoL_.size()) {
+    fifoL_.clear();
+    fifoR_.clear();
+    fifoHead_ = 0;
+  } else if (fifoHead_ > (size_t)dspRate_ && fifoHead_ * 2 > fifoL_.size()) {
+    fifoL_.erase(fifoL_.begin(), fifoL_.begin() + fifoHead_);
+    fifoR_.erase(fifoR_.begin(), fifoR_.begin() + fifoHead_);
+    fifoHead_ = 0;
+  }
+}
+
+void WasapiEngine::Deinterleave(const BYTE* data, UINT32 frames, float* L, float* R) {
+  const float* src = reinterpret_cast<const float*>(data);
+  for (UINT32 i = 0; i < frames; ++i) {
+    L[i] = src[i * 2];
+    R[i] = src[i * 2 + 1];
+  }
+}
+
+void WasapiEngine::Interleave(BYTE* data, UINT32 frames, const float* L, const float* R) {
+  float* dst = reinterpret_cast<float*>(data);
+  for (UINT32 i = 0; i < frames; ++i) {
+    dst[i * 2] = L[i];
+    dst[i * 2 + 1] = R[i];
   }
 }
 

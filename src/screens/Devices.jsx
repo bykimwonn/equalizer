@@ -30,7 +30,7 @@ export default function Devices() {
 
   const routingExplain = {
     'process-loopback':
-      'WASAPI process loopback capture (Windows 10 2004+) of the system audio stream with the BT process tree excluded, processed locally, rendered to the selected output. No feedback loop because our own render is excluded from the capture. This is the default enhanced path.',
+      'WASAPI process loopback capture (Windows 10 build 20348+) of the system audio stream with the BT process tree excluded, processed locally, rendered to the selected output. No feedback loop because our own render is excluded from the capture. This is the default enhanced path.',
     'loopback-to-cable':
       'Classic WASAPI endpoint loopback capture, processed locally, rendered to a virtual audio cable (e.g. VB-CABLE). Set the cable as the default Windows playback device to enhance all system audio through it. Requires a virtual cable driver to be installed.',
     apo:

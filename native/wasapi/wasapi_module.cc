@@ -11,6 +11,7 @@
  */
 #include <napi.h>
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -81,21 +82,18 @@ Napi::Value StartStream(const Napi::CallbackInfo& info) {
   // process callback runs on the main loop — deterministic and safe.
   engine->SetProcessCallback([tsfn](std::vector<float>& L, std::vector<float>& R) {
     auto* payload = new std::pair<std::vector<float>, std::vector<float>>(L, R);
-    auto* ok = new bool(false);
-    tsfn.BlockingCall(payload, [ok](Napi::Env env, Napi::Function js,
-                                    std::pair<std::vector<float>, std::vector<float>>* p) {
+    tsfn.BlockingCall(payload, [](Napi::Env env, Napi::Function js,
+                                  std::pair<std::vector<float>, std::vector<float>>* p) {
       Napi::ArrayBuffer abL = Napi::ArrayBuffer::New(env, p->first.data(), p->first.size() * sizeof(float));
       Napi::ArrayBuffer abR = Napi::ArrayBuffer::New(env, p->second.data(), p->second.size() * sizeof(float));
       Napi::Float32Array fL = Napi::Float32Array::New(env, p->first.size(), abL, 0);
       Napi::Float32Array fR = Napi::Float32Array::New(env, p->second.size(), abR, 0);
       js.Call({fL, fR});
-      *ok = true;
     });
     // L/R were processed in place via the typed-array views into *payload
     L = std::move(payload->first);
     R = std::move(payload->second);
     delete payload;
-    delete ok;
   });
 
   std::string error;
@@ -107,10 +105,14 @@ Napi::Value StartStream(const Napi::CallbackInfo& info) {
 
   Napi::Object handle = Napi::Object::New(env);
   auto* rawEngine = new std::shared_ptr<bt::WasapiEngine>(engine);
-  handle.Set("stop", Napi::Function::New(env, [rawEngine, tsfn](const Napi::CallbackInfo& ci) {
-    (*rawEngine)->Stop();
-    tsfn.Release();
-    delete rawEngine;
+  auto stopped = std::make_shared<std::atomic<bool>>(false);
+  handle.Set("stop", Napi::Function::New(env, [rawEngine, tsfn, stopped](const Napi::CallbackInfo& ci) {
+    // stop() may legitimately be called more than once (user stop + shutdown).
+    if (!stopped->exchange(true)) {
+      (*rawEngine)->Stop();
+      tsfn.Release();
+      delete rawEngine;
+    }
     return ci.Env().Undefined();
   }));
   return handle;
