@@ -67,22 +67,28 @@ struct Biquad {
 
 struct EqBand {
   float freq, q, gainDb;
-  int type;  // 0=peaking 1=lowshelf 2=highshelf
-  bool enabled;
+  int type;     // 0=peaking 1=lowshelf 2=highshelf
+  int enabled;  // 0/1 — int (not bool) keeps the struct padding-free so the
+                // JS serializer (engine/apo-config.js) matches byte-for-byte
 };
 
 struct ApoParams {
   float inputGainDb = 0;
   float outputGainDb = 0;
   EqBand bands[10] = {
-    {31, 1, 0, 0, true},   {62, 1, 0, 0, true},   {125, 1, 0, 0, true},
-    {250, 1, 0, 0, true},  {500, 1, 0, 0, true},  {1000, 1, 0, 0, true},
-    {2000, 1, 0, 0, true}, {4000, 1, 0, 0, true}, {8000, 1, 0, 0, true},
-    {16000, 1, 0, 0, true}
+    {31, 1, 0, 0, 1},   {62, 1, 0, 0, 1},   {125, 1, 0, 0, 1},
+    {250, 1, 0, 0, 1},  {500, 1, 0, 0, 1},  {1000, 1, 0, 0, 1},
+    {2000, 1, 0, 0, 1}, {4000, 1, 0, 0, 1}, {8000, 1, 0, 0, 1},
+    {16000, 1, 0, 0, 1}
   };
   float limiterCeilingDb = -1.0f;
-  bool bypass = false;
+  int bypass = 0;
 };
+
+// The on-disk layout is fixed: engine/apo-config.js serializes exactly these
+// sizes. If either assert fires, update BOTH sides together.
+static_assert(sizeof(EqBand) == 20, "EqBand must stay 20 bytes (padding-free)");
+static_assert(sizeof(ApoParams) == 216, "ApoParams must stay 216 bytes (padding-free)");
 
 class ApoDsp {
  public:

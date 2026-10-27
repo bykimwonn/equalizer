@@ -189,7 +189,8 @@ export default function SettingsScreen() {
           checked={ui.startWithWindows === true}
           onChange={async (v) => {
             await savePatch({ ui: { startWithWindows: v } });
-            if (window.bt?.setLoginItem) window.bt.setLoginItem(v);
+            const res = await invoke('app:setLoginItem', { enabled: v });
+            if (!res.ok) setTestRes((t) => ({ ...t, loginItem: { ok: false, error: res.error } }));
           }}
           hint="Registers the app in the current user's startup items (no admin required)"
         />

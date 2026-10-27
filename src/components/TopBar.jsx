@@ -2,9 +2,10 @@ import React from 'react';
 import { useApp } from '../state.jsx';
 
 export default function TopBar() {
-  const { telemetry, settings, invoke, engineStatus } = useApp();
+  const { telemetry, settings, invoke, engineStatus, credentials } = useApp();
   const mode = telemetry.mode ?? settings?.mode ?? 'adaptive';
-  const aiState = telemetry.status?.backend ? 'live' : 'idle';
+  // truthful AI state: whether any provider is actually configured
+  const aiConfigured = !!(credentials?.groq?.configured || credentials?.gemini?.configured);
 
   const setMode = (m) => invoke('engine:setMode', { mode: m });
 
@@ -43,7 +44,9 @@ export default function TopBar() {
             </button>
           ))}
         </div>
-        <span className={`pill ai ${aiState}`}>AI</span>
+        <span className={`pill ${aiConfigured ? 'ok' : ''}`} title={aiConfigured ? 'At least one AI provider is configured' : 'No AI provider configured — local DSP and profiles still work'}>
+          {aiConfigured ? 'AI ready' : 'AI not configured'}
+        </span>
         <button className="icon-btn" title="Settings" onClick={() => window.dispatchEvent(new CustomEvent('bt:navigate', { detail: 'settings' }))}>
           ⚙
         </button>

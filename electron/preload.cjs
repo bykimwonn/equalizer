@@ -8,6 +8,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 const INVOKE_CHANNELS = new Set([
   'app:getState',
+  'app:setLoginItem',
   'engine:start',
   'engine:stop',
   'engine:setSettings',
