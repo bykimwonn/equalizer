@@ -162,6 +162,19 @@ app.whenReady().then(async () => {
     engineHost,
     aiManager,
     getWindows: () => BrowserWindow.getAllWindows(),
+    setLoginItem: (enabled) => {
+      // per-user startup registration — no admin required, no system changes
+      if (app.isPackaged) {
+        app.setLoginItemSettings({ openAtLogin: enabled });
+      } else {
+        // dev: register electron + app path explicitly
+        app.setLoginItemSettings({
+          openAtLogin: enabled,
+          path: process.execPath,
+          args: [app.getAppPath()]
+        });
+      }
+    },
     appInfo: {
       name: app.getName(),
       version: app.getVersion(),

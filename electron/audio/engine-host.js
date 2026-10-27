@@ -9,25 +9,40 @@
  * sample loop. No network/disk work happens inside the buffer callback.
  */
 import { EventEmitter } from 'node:events';
+import { promises as fsp } from 'node:fs';
+import path from 'node:path';
 import { AudioEngine } from '../../engine/engine.js';
 import { AdaptiveController } from '../../engine/controller.js';
 import { profileSettings } from '../../engine/profiles.js';
 import { defaultSettings } from '../../engine/dsp/chain.js';
+import { serializeApoConfig } from '../../engine/apo-config.js';
 import { NativeWasapiBackend, SimulationBackend } from './backends.js';
 
 const TELEMETRY_HZ = 30;
+
+/** Default APO config location (Windows). Null elsewhere — the APO is Windows-only. */
+function defaultApoConfigPath() {
+  if (process.platform !== 'win32') return null;
+  const programData = process.env.ProgramData || 'C:\\ProgramData';
+  return path.join(programData, 'BT-AI-Equalizer', 'apo-config.bin');
+}
 
 export class EngineHost extends EventEmitter {
   /**
    * @param {object} opts
    * @param {import('../settings-store.js').SettingsStore} opts.settingsStore
    * @param {import('../ai/manager.js').AiManager} opts.aiManager
+   * @param {string|null} [opts.apoConfigPath] override for tests
    */
-  constructor({ settingsStore, aiManager }) {
+  constructor({ settingsStore, aiManager, apoConfigPath = undefined }) {
     super();
     this.settingsStore = settingsStore;
     this.aiManager = aiManager;
     this.engine = null;
+    this.apoConfigPath = apoConfigPath === undefined ? defaultApoConfigPath() : apoConfigPath;
+    this.apoStatus = { lastWriteAt: null, lastError: null, lastBytes: 0 };
+    this._pendingPersist = null;
+    this._pendingApoWrite = null;
     this.controller = new AdaptiveController({
       aiClient: {
         recommend: async (features, preferences, mode) => {
@@ -75,6 +90,7 @@ export class EngineHost extends EventEmitter {
     this.controller.setCurrentSettings(dsp);
     const pers = await this.settingsStore.getPersonalization();
     this.controller.setPreferences(pers.preferences);
+    this._writeApoConfig(dsp);
     return { ok: true };
   }
 
@@ -172,7 +188,42 @@ export class EngineHost extends EventEmitter {
     this.controller.setCurrentSettings(settings);
     // fire-and-forget persistence — never blocks the audio path; shutdown() flushes
     this._pendingPersist = this.settingsStore.setDspSettings(settings).catch(() => {});
+    // keep the system-wide APO's config snapshot in sync (if that route is used)
+    this._writeApoConfig(settings);
     this.emit('settings-changed', { settings, meta });
+  }
+
+  /**
+   * Write the APO config file consumed by the system-wide APO (native/apo).
+   * Runs off the audio path; failures surface honestly in diagnostics rather
+   * than being hidden (e.g. %ProgramData% not writable for non-admin users —
+   * the registration script creates the folder with user-write ACL).
+   */
+  _writeApoConfig(settings) {
+    if (!this.apoConfigPath) return;
+    const target = this.apoConfigPath;
+    let bytes;
+    try {
+      bytes = serializeApoConfig(settings);
+    } catch (e) {
+      this.apoStatus = { ...this.apoStatus, lastError: `serialize: ${e.message}` };
+      return;
+    }
+    const tmp = `${target}.${process.pid}.tmp`;
+    this._pendingApoWrite = fsp
+      .mkdir(path.dirname(target), { recursive: true })
+      .then(() => fsp.writeFile(tmp, bytes))
+      .then(() => fsp.rename(tmp, target))
+      .then(() => {
+        this.apoStatus = { lastWriteAt: Date.now(), lastError: null, lastBytes: bytes.length };
+      })
+      .catch((e) => {
+        this.apoStatus = {
+          lastWriteAt: this.apoStatus.lastWriteAt,
+          lastError: String(e.message ?? e),
+          lastBytes: 0
+        };
+      });
   }
 
   async setMode(mode) {
@@ -266,6 +317,10 @@ export class EngineHost extends EventEmitter {
         mode: this.controller.mode,
         safetyActions: this.controller.safetyActions,
         history: this.controller.history.slice(-20)
+      },
+      apoConfig: {
+        path: this.apoConfigPath,
+        ...this.apoStatus
       }
     };
   }
@@ -275,5 +330,6 @@ export class EngineHost extends EventEmitter {
     // flush any in-flight settings persistence — clean quit must not race
     // the config writer (Windows especially: leftover tmp files / lost writes)
     if (this._pendingPersist) await this._pendingPersist;
+    if (this._pendingApoWrite) await this._pendingApoWrite;
   }
 }

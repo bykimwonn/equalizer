@@ -8,6 +8,7 @@
 
 export const IPC_INVOKE_CHANNELS = Object.freeze([
   'app:getState',
+  'app:setLoginItem',
   'engine:start',
   'engine:stop',
   'engine:setSettings',
@@ -67,7 +68,7 @@ function assertObject(v, name) {
  * @param {object} deps.ipcMain Electron ipcMain (or a test double)
  * @param {() => Array} [deps.getWindows] returns BrowserWindows to push to
  */
-export function registerIpc({ ipcMain, settingsStore, engineHost, aiManager, appInfo, getWindows = () => [] }) {
+export function registerIpc({ ipcMain, settingsStore, engineHost, aiManager, appInfo, getWindows = () => [], setLoginItem = null }) {
   const handle = (channel, fn) => {
     if (!isAllowedInvoke(channel)) throw new Error(`refusing to register non-allowlisted channel ${channel}`);
     ipcMain.handle(channel, async (_event, payload) => {
@@ -108,6 +109,12 @@ export function registerIpc({ ipcMain, settingsStore, engineHost, aiManager, app
       engineStatus: engineHost.status,
       backends: engineHost.backendStatus()
     };
+  });
+
+  handle('app:setLoginItem', async (payload) => {
+    const enabled = payload?.enabled === true;
+    if (setLoginItem) setLoginItem(enabled);
+    return { ok: true, enabled };
   });
 
   handle('engine:start', () => engineHost.start());

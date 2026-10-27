@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { SettingsStore, machineKeyCryptor } from '../electron/settings-store.js';
@@ -138,5 +138,34 @@ test('clip guard runs against real measured features in the loop', async () => {
   await host.shutdown();
   const persisted = await store.getDspSettings();
   assert.ok(Number.isFinite(persisted.outputGainDb), 'flushed settings must be readable');
+  await cleanup(dir);
+});
+
+test('APO config file is written and kept in sync with DSP settings', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'bt-eq-apo-'));
+  const apoPath = path.join(dir, 'cfg', 'apo-config.bin');
+  const store = new SettingsStore(dir, machineKeyCryptor(dir));
+  await store.init();
+  const host = new EngineHost({ settingsStore: store, aiManager: makeFakeAi(), apoConfigPath: apoPath });
+  await host.init();
+
+  // init writes the initial snapshot
+  await host.shutdown();
+  const { parseApoConfig } = await import('../engine/apo-config.js');
+  const first = parseApoConfig(await readFile(apoPath));
+  assert.equal(first.version, 1);
+  assert.equal(first.bands.length, 10);
+
+  // applySettings updates the snapshot (and shutdown flushes it)
+  const s = host.engine.getSettings();
+  s.outputGainDb = -7;
+  s.bypass = true;
+  host.applySettings(s, { source: 'test' });
+  await host.shutdown();
+  const second = parseApoConfig(await readFile(apoPath));
+  assert.equal(second.outputGainDb, -7);
+  assert.equal(second.bypass, true);
+  assert.equal(host.diagnostics().apoConfig.lastError, null);
+  assert.ok(host.diagnostics().apoConfig.lastWriteAt > 0);
   await cleanup(dir);
 });

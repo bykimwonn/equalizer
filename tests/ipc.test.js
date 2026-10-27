@@ -24,6 +24,7 @@ test('allowlist has no duplicates and covers every required capability', () => {
   assert.equal(new Set(IPC_PUSH_CHANNELS).size, IPC_PUSH_CHANNELS.length);
   for (const required of [
     'app:getState',
+    'app:setLoginItem',
     'engine:start',
     'engine:setSettings',
     'settings:setApiKey',
@@ -84,6 +85,8 @@ test('invoke handler registration refuses non-allowlisted channels', async () =>
     getStatus() { return {}; },
     invalidate() {}
   };
+  const loginItems = [];
+  const fakeSetLoginItem = (enabled) => loginItems.push(enabled);
 
   // BrowserWindow import is fine in Node — registerIpc only touches it on push
   const { registerIpc: reg } = await import('../electron/ipc.js');
@@ -92,7 +95,8 @@ test('invoke handler registration refuses non-allowlisted channels', async () =>
     settingsStore: fakeStore,
     engineHost: fakeHost,
     aiManager: fakeAi,
-    appInfo: { name: 'test' }
+    appInfo: { name: 'test' },
+    setLoginItem: fakeSetLoginItem
   });
 
   // every registered handler is in the allowlist
@@ -102,10 +106,19 @@ test('invoke handler registration refuses non-allowlisted channels', async () =>
   assert.equal(Object.keys(handlers).length, IPC_INVOKE_CHANNELS.length);
 
   // handlers return {ok:false,error} instead of throwing
-  const bad = await handlers['engine:setSettings']({ settings: 'not-an-object' });
+  // (real ipcMain.handle signature: (event, payload))
+  const ev = {};
+  const bad = await handlers['engine:setSettings'](ev, { settings: 'not-an-object' });
   assert.equal(bad.ok, false);
   assert.ok(bad.error.length > 0);
 
-  const key = await handlers['settings:setApiKey']({ provider: 'groq', apiKey: 'short' });
+  const key = await handlers['settings:setApiKey'](ev, { provider: 'groq', apiKey: 'short' });
   assert.equal(key.ok, false);
+
+  // login item handler delegates and validates types
+  const li = await handlers['app:setLoginItem'](ev, { enabled: true });
+  assert.deepEqual(li, { ok: true, enabled: true });
+  const li2 = await handlers['app:setLoginItem'](ev, { enabled: 'yes' });
+  assert.equal(li2.enabled, false, 'non-boolean must not enable');
+  assert.deepEqual(loginItems, [true, false]);
 });

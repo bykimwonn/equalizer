@@ -46,7 +46,7 @@ export class NativeWasapiBackend extends EventEmitter {
   }
 
   get available() {
-    return !!this.native && !this.streamError;
+    return !!this.native;
   }
 
   get statusDetail() {

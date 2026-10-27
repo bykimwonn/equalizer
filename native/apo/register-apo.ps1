@@ -57,6 +57,14 @@ New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 Copy-Item $DllPath (Join-Path $installDir "bt-ai-eq-apo.dll") -Force
 $dllFull = Join-Path $installDir "bt-ai-eq-apo.dll"
 
+# Config folder the app writes (APO polls apo-config.bin there). Created with a
+# Users-modify ACL so the non-elevated app can update it. Uses the well-known
+# SID S-1-5-32-545 (BUILTIN\Users) to avoid localized group names.
+Write-Host "Creating APO config folder with user-write access..."
+$cfgDir = Join-Path $env:ProgramData "BT-AI-Equalizer"
+New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+icacls $cfgDir /grant "*S-1-5-32-545:(OI)(CI)M" | Out-Null
+
 Write-Host "Registering COM server..."
 New-Item -Path $clsidKey -Force | Out-Null
 New-Item -Path "$clsidKey\InprocServer32" -Force | Out-Null
