@@ -1008,3 +1008,39 @@ kbd {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--border);
 }
+
+/* ---------- scroll affordance ----------
+   The screen area is the only scroll region (the shell itself never scrolls).
+   Make the scrollbar clearly visible so content below the fold is discoverable. */
+.screen::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+.screen::-webkit-scrollbar-track {
+  background: transparent;
+}
+.screen::-webkit-scrollbar-thumb {
+  background: #2b3b48;
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 8px;
+}
+.screen::-webkit-scrollbar-thumb:hover {
+  background: #3c5464;
+  background-clip: content-box;
+}
+
+/* ---------- honest status banners ---------- */
+.banner {
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  border: 1px solid;
+  margin-bottom: 4px;
+}
+.banner.warn {
+  background: rgba(245, 158, 11, 0.08);
+  border-color: rgba(245, 158, 11, 0.35);
+  color: #fbbf24;
+}

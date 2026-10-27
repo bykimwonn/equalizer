@@ -27,6 +27,38 @@ function defaultApoConfigPath() {
   return path.join(programData, 'BT-AI-Equalizer', 'apo-config.bin');
 }
 
+/**
+ * Same-device duplication risk for tap-and-rerender capture.
+ *
+ * WASAPI loopback — including process loopback — is a NON-DESTRUCTIVE TAP,
+ * not a reroute: Windows keeps rendering the captured apps' original audio to
+ * their endpoint while this app renders its processed copy to the render
+ * device. When both copies are audible (the normal case — apps play to the
+ * default device and BT renders to the same device), the user hears BOTH:
+ * doubling and comb-filtering that sounds hollow/harsh/echoey ("too much
+ * treble"), plus possible output clipping from the summed level.
+ * EXCLUDE_TARGET_PROCESS_TREE only prevents the feedback *loop* (BT hearing
+ * its own render); it does not mute or divert the original playback.
+ *
+ * Single-path (no duplication) options: 'loopback-to-cable' (apps render to
+ * an inaudible virtual cable, BT enhances onto the real device) and 'apo'
+ * (in-place DSP inside the Windows audio engine).
+ *
+ * @param {string} routingMode
+ * @returns {{kind: string, message: string} | null}
+ */
+export function duplicationRisk(routingMode) {
+  if (routingMode !== 'process-loopback') return null;
+  return {
+    kind: 'same-device-doubling',
+    message:
+      'Loopback capture is a tap, not a reroute: Windows keeps playing the original audio while BT renders an enhanced copy. ' +
+      'If both are audible you hear a doubled, comb-filtered signal (hollow/harsh/echoey) — this is not an EQ bug. ' +
+      'For clean single-path sound use Routing → "Loopback to virtual cable" (VB-CABLE) or the APO path. ' +
+      'To audition the untouched original, press Stop — the bypass toggle keeps the doubled signal playing.'
+  };
+}
+
 export class EngineHost extends EventEmitter {
   /**
    * @param {object} opts
@@ -68,6 +100,7 @@ export class EngineHost extends EventEmitter {
       state: 'stopped',
       backend: null,
       backendDetail: '',
+      duplication: null,
       routingMode: null,
       device: null,
       lastError: null,
@@ -149,12 +182,18 @@ export class EngineHost extends EventEmitter {
       });
       this.activeBackend = backend;
       this.running = true;
+      // Real-device tap-and-rerender backends can double what the user hears
+      // (see duplicationRisk): the captured apps still render their original
+      // audio while we render our processed copy. Surface it honestly in
+      // status → UI banner + diagnostics instead of pretending clean output.
+      const duplication = backend.id === 'wasapi' ? duplicationRisk(app.audio.routingMode) : null;
       this.status = {
         state: 'running',
         backend: backend.id,
         backendDetail: backend.statusDetail,
         routingMode: app.audio.routingMode,
         device: app.audio.renderDeviceId,
+        duplication,
         lastError: null,
         restarts: this.status.restarts
       };
@@ -176,7 +215,7 @@ export class EngineHost extends EventEmitter {
     if (this._watchdog) clearInterval(this._watchdog);
     this._telemetryTimer = null;
     this._watchdog = null;
-    this.status = { ...this.status, state: 'stopped' };
+    this.status = { ...this.status, state: 'stopped', duplication: null };
     this.emit('status', this.status);
     return { ok: true };
   }

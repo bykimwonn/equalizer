@@ -50,17 +50,28 @@ from creates feedback. BT AI Equalizer implements three honest modes:
   **minus BT's own render stream** → processing + rendering to the same
   endpoint is feedback-free by construction.
 - Scope: everything played by the system except the app's own audio.
+- **Honest limitation — doubling:** loopback is a *tap*, not a reroute. The
+  captured apps keep playing their original audio on the device while BT
+  renders its processed copy to the same device. The user hears **both**
+  copies (doubling / comb-filtering — hollow, harsh, echoey; often misread as
+  "too much treble"), and the summed level can clip the output. This is a
+  Windows-capture semantic, not an EQ bug; the UI shows a runtime warning
+  whenever this mode is active. For clean single-copy sound use Mode B or C.
+  (To A/B the untouched original, stop the engine — the bypass toggle keeps
+  the doubled signal playing.)
 - Fallback: classic loopback (`AUDCLNT_STREAMFLAGS_LOOPBACK`) with an explicit
   status warning when activation fails.
 
-### Mode B — Virtual Cable Routing
+### Mode B — Virtual Cable Routing (clean single-copy capture)
 `audio.routingMode = loopback-to-cable`
 
-- Classic endpoint loopback → DSP → render to a virtual cable (VB-CABLE or
-  equivalent, third-party signed driver). The user sets the cable as the
-  default playback device. This is a true system-wide path but requires the
-  cable driver to be installed — **we never install or silently change your
-  default device**.
+- The user sets a virtual cable (VB-CABLE or equivalent, third-party signed
+  driver) as the **default playback device**, so every app renders into the
+  cable (which is not audible). BT loopback-captures the cable's output,
+  processes it, and renders the enhanced result to the **real** output device.
+  One copy reaches the ears: a true system-wide path with no doubling.
+  Requires the cable driver to be installed — **we never install or silently
+  change your default device**.
 
 ### Mode C — APO (true system-wide, in audiodg)
 `audio.routingMode = apo` + `native/apo`

@@ -33,11 +33,19 @@ export default function Overview() {
 
   return (
     <div className="grid">
+      {engineStatus.duplication && engineStatus.state === 'running' && (
+        <div className="banner warn span-2" role="alert">
+          <strong>Heads up — you are hearing two copies of the audio.</strong>{' '}
+          {engineStatus.duplication.message}
+        </div>
+      )}
       <Panel
         title="Master Processing"
         sub={engineStatus.backend === 'simulation'
           ? 'Simulation backend — generated test signal, no real audio I/O'
-          : 'Enhanced audio path active on the selected output'}
+          : engineStatus.duplication
+            ? 'Enhanced path active — the original audio also plays on the device (see warning above)'
+            : 'Enhanced audio path active on the selected output'}
         className="span-2 master"
         right={
           <div className="master-actions">
